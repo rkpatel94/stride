@@ -1,0 +1,22 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Precise location is requested at runtime; coarse is declared because Android 12+
+       requires it alongside fine and lets the user choose "approximate". -->
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <!-- Required for foregroundServiceType="location" on Android 14 (API 34) and later. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+  <!-- Runtime permission on Android 13+; tracking still works if denied, the notification is just hidden. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <!-- ACCESS_BACKGROUND_LOCATION is intentionally NOT declared. Tracking always starts from a
+       user action while the app is visible, so the location foreground service keeps
+       "while-in-use" access after the screen is locked. -->
+
+  <application>
+    <service
+      android:name="expo.modules.androidlocation.TrackingService"
+      android:exported="false"
+      android:foregroundServiceType="location" />
+  </application>
+</manifest>

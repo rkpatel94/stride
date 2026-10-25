@@ -1,0 +1,30 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.androidlocation'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.androidlocation"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+  testOptions {
+    unitTests.returnDefaultValues = true
+  }
+}
+
+dependencies {
+  // Fused Location Provider (free, part of Google Play services; no API key). The version can be
+  // overridden with `googlePlayServicesLocationVersion` in the root project if another library pins it.
+  implementation "com.google.android.gms:play-services-location:${rootProject.ext.has('googlePlayServicesLocationVersion') ? rootProject.ext.get('googlePlayServicesLocationVersion') : '21.3.0'}"
+  implementation "androidx.core:core-ktx:1.13.1"
+
+  testImplementation "junit:junit:4.13.2"
+}
