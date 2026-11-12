@@ -1,3 +1,4 @@
+import { DEFAULT_INTERVAL_PLAN, normalizePlan, type IntervalPlan } from '@/features/tracking/intervals';
 import { DEFAULT_WEEK_START, type WeekStart } from '@/utils/dates';
 
 import type { SqlDatabase } from './types';
@@ -7,6 +8,11 @@ export type Preferences = {
   keepScreenOnWhileTracking: boolean;
   lastActivityType: 'walk' | 'run';
   notificationPermissionAsked: boolean;
+  /** Stop the active clock while standing still (traffic lights, a chat). */
+  autoPause: boolean;
+  /** Start workouts with run/walk intervals. */
+  intervalsEnabled: boolean;
+  intervalPlan: IntervalPlan;
 };
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -14,6 +20,9 @@ export const DEFAULT_PREFERENCES: Preferences = {
   keepScreenOnWhileTracking: false,
   lastActivityType: 'walk',
   notificationPermissionAsked: false,
+  autoPause: false,
+  intervalsEnabled: false,
+  intervalPlan: DEFAULT_INTERVAL_PLAN,
 };
 
 export async function getPreferences(db: SqlDatabase): Promise<Preferences> {
@@ -38,6 +47,11 @@ export async function getPreferences(db: SqlDatabase): Promise<Preferences> {
         : DEFAULT_PREFERENCES.keepScreenOnWhileTracking,
     lastActivityType: stored.lastActivityType === 'run' ? 'run' : 'walk',
     notificationPermissionAsked: stored.notificationPermissionAsked === true,
+    autoPause: stored.autoPause === true,
+    intervalsEnabled: stored.intervalsEnabled === true,
+    intervalPlan: normalizePlan(
+      stored.intervalPlan && typeof stored.intervalPlan === 'object' ? (stored.intervalPlan as Partial<Record<keyof IntervalPlan, unknown>>) : null,
+    ),
   };
 }
 
@@ -46,8 +60,5 @@ export async function setPreference<K extends keyof Preferences>(
   key: K,
   value: Preferences[K],
 ): Promise<void> {
-  await db.runAsync(
-    'INSERT INTO preferences (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
-    [key, JSON.stringify(value)],
-  );
+  await db.runAsync('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)', [key, JSON.stringify(value)]);
 }

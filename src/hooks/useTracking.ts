@@ -25,10 +25,15 @@ export function useTicker(enabled: boolean, intervalMs = 1000): number {
 
 /** Durations extrapolated from the last native status using the monotonic JS clock. */
 export function liveDurations(snapshot: LiveSnapshot, now: number) {
-  const extra = snapshot.durationsTicking ? Math.max(0, now - snapshot.durationsCapturedAt) : 0;
+  const since = Math.max(0, now - snapshot.durationsCapturedAt);
+  const active = snapshot.durationsTicking ? since : 0;
+  const activeMs = snapshot.activeMs + active;
+  const runActiveMs = Math.min(activeMs, snapshot.runActiveMs + (snapshot.activityType === 'run' ? active : 0));
   return {
-    activeSeconds: (snapshot.activeMs + extra) / 1000,
-    elapsedSeconds: (snapshot.elapsedMs + extra) / 1000,
+    activeSeconds: activeMs / 1000,
+    elapsedSeconds: (snapshot.elapsedMs + (snapshot.elapsedTicking ? since : 0)) / 1000,
+    runActiveSeconds: runActiveMs / 1000,
+    walkActiveSeconds: (activeMs - runActiveMs) / 1000,
   };
 }
 

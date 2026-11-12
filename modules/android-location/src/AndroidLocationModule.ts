@@ -1,6 +1,6 @@
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 
-import type { AndroidLocationEvents, StartTrackingOptions } from './AndroidLocation.types';
+import type { ActivityType, AndroidLocationEvents, StartTrackingOptions, WidgetSummary } from './AndroidLocation.types';
 
 declare class AndroidLocationNativeModule extends NativeModule<AndroidLocationEvents> {
   getStatusAsync(): Promise<unknown>;
@@ -9,6 +9,10 @@ declare class AndroidLocationNativeModule extends NativeModule<AndroidLocationEv
   pauseTrackingAsync(): Promise<unknown>;
   resumeTrackingAsync(): Promise<unknown>;
   finishTrackingAsync(): Promise<unknown>;
+  /** Starts a walking or running part of the current workout. */
+  switchActivityTypeAsync(activityType: ActivityType): Promise<unknown>;
+  setAutoPauseAsync(enabled: boolean): Promise<unknown>;
+  updateWidgetAsync(summary: WidgetSummary): Promise<boolean>;
   discardTrackingAsync(): Promise<unknown>;
   clearSessionAsync(activityId: number): Promise<boolean>;
   readJournalAsync(activityId: number, afterSequence: number, limit: number): Promise<unknown[]>;

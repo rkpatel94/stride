@@ -1,7 +1,8 @@
-import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-import type { ComponentProps } from 'react';
+import Svg, { Path } from 'react-native-svg';
 
-export type IconName = ComponentProps<typeof MaterialCommunityIcons>['name'];
+import { ICON_PATHS, type IconName } from './iconPaths';
+
+export type { IconName };
 
 type IconProps = {
   name: IconName;
@@ -10,16 +11,20 @@ type IconProps = {
   accessibilityLabel?: string;
 };
 
+/** Material Design icon drawn from its SVG path (see iconPaths.ts). */
 export function Icon({ name, size = 22, color, accessibilityLabel }: IconProps) {
   return (
-    <MaterialCommunityIcons
-      name={name}
-      size={size}
-      color={color}
+    <Svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      accessible={Boolean(accessibilityLabel)}
+      accessibilityRole={accessibilityLabel ? 'image' : undefined}
       accessibilityLabel={accessibilityLabel}
       accessibilityElementsHidden={!accessibilityLabel}
-      importantForAccessibility={accessibilityLabel ? 'yes' : 'no-hide-descendants'}
-    />
+      importantForAccessibility={accessibilityLabel ? 'yes' : 'no-hide-descendants'}>
+      <Path d={ICON_PATHS[name]} fill={color} />
+    </Svg>
   );
 }
 
@@ -36,6 +41,8 @@ const ACHIEVEMENT_ICONS: Record<string, IconName> = {
   first_25k_week: 'calendar-week',
   first_100k_month: 'calendar-month',
   daily_goal_completed: 'target',
+  weekly_goal_completed: 'calendar-check',
+  monthly_goal_completed: 'calendar-star',
   streak_7_days: 'fire',
   personal_best_distance: 'lightning-bolt',
 };

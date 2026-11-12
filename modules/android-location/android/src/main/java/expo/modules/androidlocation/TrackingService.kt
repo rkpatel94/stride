@@ -28,6 +28,9 @@ import androidx.core.content.ContextCompat
  *  - Each fix is appended to [TrackingJournal] on a dedicated worker thread before anything else.
  *  - Pause stops location requests but keeps the service (and notification) alive so the user can
  *    resume from the notification. Finish/discard stop the service.
+ *  - Auto-pause (if enabled) stops the active clock while the phone stands still; location updates
+ *    keep running so movement can restart it.
+ *  - Run/walk intervals switch the walk/run part and play cues at each phase change.
  *  - If the system kills and restarts the service (START_STICKY), recording only continues when
  *    Android allows location access from the background; otherwise the session is marked
  *    interrupted and the user is told to reopen the app.
@@ -41,6 +44,16 @@ class TrackingService : Service() {
   private var collecting = false
   private var stopping = false
   private var receiversRegistered = false
+
+  // Main thread only.
+  private var cues: WorkoutCues? = null
+
+  // Worker thread only: auto-pause detection and the last interval phase announced.
+  private var stillSinceElapsed: Long? = null
+  private var movingSinceElapsed: Long? = null
+  private var movingFixes = 0
+  private var announcedPhase: Int? = null
+  private var lastWidgetRefreshElapsed = 0L
 
   // Live signal state, read by the module for status snapshots.
   @Volatile var signalLost = false
@@ -81,6 +94,8 @@ class TrackingService : Service() {
       workerHandler.postDelayed(this, TICK_INTERVAL_MS)
     }
   }
+
+  private val intervalTicker = Runnable { scheduleIntervals() }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -141,6 +156,7 @@ class TrackingService : Service() {
     if (!mayRecordFromBackground || !DeviceStatus.hasAnyLocationPermission(this)) {
       TrackingController.session(this)?.let { TrackingNotifications.showInterrupted(this, it) }
       emitStatus()
+      StrideWidget.refresh(this)
       stopEverything()
       return
     }
@@ -173,7 +189,7 @@ class TrackingService : Service() {
     }
   }
 
-  /** Brings location collection and the notification in line with the persisted session. */
+  /** Brings location collection, intervals and the notification in line with the persisted session. */
   fun applySession() {
     if (Looper.myLooper() != Looper.getMainLooper()) {
       mainHandler.post { applySession() }
@@ -188,8 +204,13 @@ class TrackingService : Service() {
     // The heartbeat also runs while paused so an interruption is dated accurately.
     workerHandler.removeCallbacks(ticker)
     workerHandler.postDelayed(ticker, TICK_INTERVAL_MS)
+    workerHandler.post {
+      resetMotionDetection()
+      scheduleIntervals()
+    }
     refreshNotification(force = true)
     emitStatus()
+    StrideWidget.refresh(this)
   }
 
   private fun startCollecting(session: TrackingSession) {
@@ -233,7 +254,7 @@ class TrackingService : Service() {
     val session = TrackingController.session(this) ?: return
     if (session.state != SessionState.RECORDING) return
     val sequence = try {
-      TrackingJournal.get(this).append(session.activityId, session.segmentIndex, location)
+      TrackingJournal.get(this).append(session.activityId, session.segmentIndex, session.activityType, location)
     } catch (error: Exception) {
       Log.e(TAG, "Could not write location to the journal", error)
       TrackingEvents.emit(
@@ -252,11 +273,100 @@ class TrackingService : Service() {
       TrackingEvents.locationPayload(location) + mapOf(
         "sequence" to sequence.toDouble(),
         "activityId" to session.activityId.toDouble(),
-        "segmentIndex" to session.segmentIndex
+        "segmentIndex" to session.segmentIndex,
+        "activityType" to session.activityType
       )
     )
-    if (wasLost) emitStatus()
-    refreshNotification(force = wasLost)
+    val changed = detectAutoPause(session, location, fixElapsed)
+    // Interval phases follow the active clock; checking on every fix keeps them on time even if
+    // the timer is delayed while the phone sleeps between fixes.
+    scheduleIntervals()
+    if (wasLost || changed) emitStatus()
+    refreshNotification(force = wasLost || changed)
+    refreshWidgetThrottled()
+  }
+
+  /**
+   * Worker thread. Stops the active clock after [STOP_AFTER_MS] below walking speed, dated from
+   * when the phone stopped; restarts it after [MOVE_CONFIRMATIONS] fixes at walking speed, dated
+   * from the first of them. Returns true when the state changed.
+   */
+  private fun detectAutoPause(session: TrackingSession, location: Location, fixElapsed: Long): Boolean {
+    if (!session.autoPauseEnabled || !location.hasSpeed()) return false
+    val speed = location.speed
+    if (!session.autoPaused) {
+      movingFixes = 0
+      if (speed >= STOP_SPEED_MPS) {
+        stillSinceElapsed = null
+        return false
+      }
+      val since = stillSinceElapsed ?: fixElapsed.also { stillSinceElapsed = it }
+      if (fixElapsed - since < STOP_AFTER_MS) return false
+      stillSinceElapsed = null
+      TrackingController.setAutoPaused(this, true, since)
+      return true
+    }
+    stillSinceElapsed = null
+    if (speed < MOVE_SPEED_MPS) {
+      movingFixes = 0
+      return false
+    }
+    if (movingFixes == 0) movingSinceElapsed = fixElapsed
+    movingFixes += 1
+    if (movingFixes < MOVE_CONFIRMATIONS) return false
+    movingFixes = 0
+    TrackingController.setAutoPaused(this, false, movingSinceElapsed ?: fixElapsed)
+    return true
+  }
+
+  private fun resetMotionDetection() {
+    stillSinceElapsed = null
+    movingSinceElapsed = null
+    movingFixes = 0
+  }
+
+  /**
+   * Worker thread. Announces the current interval phase when it changed (switching the walk/run
+   * part to match) and waits for the next change. The interval clock is the active clock, so it
+   * stands still while paused or auto-paused.
+   */
+  private fun scheduleIntervals() {
+    workerHandler.removeCallbacks(intervalTicker)
+    val session = TrackingController.session(this) ?: return
+    val plan = session.intervals ?: return
+    if (!session.isActive) return
+    val active = session.activeMs(SystemClock.elapsedRealtime())
+    val phase = plan.phaseAt(active)
+    if (announcedPhase != phase) announcePhase(session, plan, phase)
+    if (session.state != SessionState.RECORDING || session.autoPaused) return
+    val wait = plan.msToNextPhase(active) ?: return
+    workerHandler.postDelayed(intervalTicker, wait + PHASE_MARGIN_MS)
+  }
+
+  private fun announcePhase(session: TrackingSession, plan: IntervalPlan, phase: Int) {
+    announcedPhase = phase
+    val done = phase >= plan.repeats * 2
+    val running = phase % 2 == 0
+    val round = phase / 2 + 1
+    if (!done) {
+      val type = if (running) "run" else "walk"
+      if (session.activityType != type) TrackingController.switchType(this, type)
+    }
+    val text = when {
+      done -> "Intervals done. Keep going, or finish when you're ready."
+      running -> "Run for ${WorkoutCues.spokenDuration(plan.runMs)}. Round $round of ${plan.repeats}."
+      round == plan.repeats -> "Last walk, ${WorkoutCues.spokenDuration(plan.walkMs)}."
+      else -> "Walk for ${WorkoutCues.spokenDuration(plan.walkMs)}."
+    }
+    val pattern = when {
+      done -> WorkoutCues.Pattern.DONE
+      running -> WorkoutCues.Pattern.RUN
+      else -> WorkoutCues.Pattern.WALK
+    }
+    mainHandler.post { (cues ?: WorkoutCues(this).also { cues = it }).cue(text, pattern) }
+    emitStatus()
+    refreshNotification(force = true)
+    StrideWidget.refresh(this)
   }
 
   /** Periodic heartbeat plus detection of GPS loss and location services being switched off. */
@@ -302,6 +412,13 @@ class TrackingService : Service() {
     }
   }
 
+  private fun refreshWidgetThrottled() {
+    val now = SystemClock.elapsedRealtime()
+    if (now - lastWidgetRefreshElapsed < WIDGET_REFRESH_INTERVAL_MS) return
+    lastWidgetRefreshElapsed = now
+    StrideWidget.refresh(this)
+  }
+
   private fun liveSignal() = LiveSignal(
     locationEnabled = locationEnabled,
     signalLost = signalLost,
@@ -338,6 +455,8 @@ class TrackingService : Service() {
     }
     workerHandler.removeCallbacksAndMessages(null)
     worker.quitSafely()
+    cues?.shutdown()
+    cues = null
     isRunning = false
     instance = null
     // Destroyed while the workout is still active and nobody asked us to stop: the system took
@@ -347,6 +466,7 @@ class TrackingService : Service() {
       TrackingController.markInterrupted(this, "service_stopped")
     }
     emitStatus()
+    StrideWidget.refresh(this)
     super.onDestroy()
   }
 
@@ -368,6 +488,16 @@ class TrackingService : Service() {
     private const val TICK_INTERVAL_MS = 5_000L
     private const val SIGNAL_LOST_AFTER_MS = 10_000L
     private const val MIN_NOTIFICATION_INTERVAL_MS = 5_000L
+    private const val WIDGET_REFRESH_INTERVAL_MS = 15_000L
+
+    // Auto-pause: below STOP_SPEED for STOP_AFTER_MS stops the clock; MOVE_CONFIRMATIONS fixes at
+    // MOVE_SPEED or more restart it. The gap between the two speeds keeps GPS jitter from flapping.
+    private const val STOP_SPEED_MPS = 0.35f
+    private const val STOP_AFTER_MS = 8_000L
+    private const val MOVE_SPEED_MPS = 0.7f
+    private const val MOVE_CONFIRMATIONS = 2
+
+    private const val PHASE_MARGIN_MS = 25L
 
     @Volatile
     var isRunning = false
@@ -403,6 +533,12 @@ class TrackingService : Service() {
         "state" to (session?.state?.value ?: "idle"),
         "elapsedMs" to session?.elapsedMs(now)?.toDouble(),
         "activeMs" to session?.activeMs(now)?.toDouble(),
+        "runActiveMs" to session?.runActiveMs(now)?.toDouble(),
+        "autoPaused" to (session?.autoPaused ?: false),
+        "autoPauseEnabled" to (session?.autoPauseEnabled ?: false),
+        "intervalRunMs" to session?.intervals?.runMs?.toDouble(),
+        "intervalWalkMs" to session?.intervals?.walkMs?.toDouble(),
+        "intervalRepeats" to session?.intervals?.repeats,
         "startedAtWallMs" to session?.startedAtWallMs?.toDouble(),
         "finishedAtWallMs" to session?.finishedAtWallMs?.toDouble(),
         "segmentIndex" to session?.segmentIndex,

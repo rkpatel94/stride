@@ -4,7 +4,7 @@ import { listGoals } from '@/database/goalRepository';
 import { getPreferences, type Preferences } from '@/database/preferencesRepository';
 import type { SqlDatabase } from '@/database/types';
 import type { Activity } from '@/features/activities/types';
-import { goalInEffect, goalProgress, type GoalProgress } from '@/features/goals/goals';
+import { currentGoalProgress, goalInEffect, goalProgress, type GoalProgress } from '@/features/goals/goals';
 import { localDayKey, startOfLocalDay } from '@/utils/dates';
 
 import {
@@ -22,6 +22,9 @@ import {
 export type DashboardData = {
   today: PeriodSummary;
   goal: GoalProgress | null;
+  /** This week's and this month's goal progress; null when that goal is off. */
+  weekGoal: GoalProgress | null;
+  monthGoal: GoalProgress | null;
   /** This week with its days and the change against last week. */
   week: ComparedPeriod;
   /** Local midnight of the day the data was loaded for (marks today in the week). */
@@ -48,6 +51,8 @@ export async function loadDashboard(db: SqlDatabase, nowMs = Date.now()): Promis
   return {
     today,
     goal: goal ? goalProgress(goal.targetDistanceMeters, today.totalDistanceMeters) : null,
+    weekGoal: currentGoalProgress(summaries, goals, 'weekly', nowMs, preferences.weekStartsOn),
+    monthGoal: currentGoalProgress(summaries, goals, 'monthly', nowMs, preferences.weekStartsOn),
     week: weeklySummary(summaries, nowMs, preferences.weekStartsOn),
     todayStartMs: startOfLocalDay(nowMs),
     month: monthlySummary(summaries, nowMs).current,

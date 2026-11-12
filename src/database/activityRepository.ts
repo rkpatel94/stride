@@ -12,6 +12,10 @@ type ActivityRow = {
   elapsed_duration_seconds: number | null;
   active_duration_seconds: number | null;
   distance_meters: number;
+  walk_distance_meters: number;
+  run_distance_meters: number;
+  walk_active_seconds: number;
+  run_active_seconds: number;
   average_pace_seconds_per_km: number | null;
   average_speed_mps: number | null;
   gps_quality_summary: string | null;
@@ -47,6 +51,10 @@ function mapActivity(row: ActivityRow): Activity {
     elapsedDurationSeconds: row.elapsed_duration_seconds,
     activeDurationSeconds: row.active_duration_seconds,
     distanceMeters: row.distance_meters,
+    walkDistanceMeters: row.walk_distance_meters,
+    runDistanceMeters: row.run_distance_meters,
+    walkActiveSeconds: row.walk_active_seconds,
+    runActiveSeconds: row.run_active_seconds,
     averagePaceSecondsPerKm: row.average_pace_seconds_per_km,
     averageSpeedMps: row.average_speed_mps,
     gpsQualitySummary: parseQualitySummary(row.gps_quality_summary),
@@ -107,9 +115,22 @@ export async function listActivities(db: SqlDatabase, filter: ActivityListFilter
 /** Lightweight rows for statistics and achievements (completed only). */
 export async function listActivitySummaries(db: SqlDatabase): Promise<ActivitySummary[]> {
   const rows = await db.getAllAsync<
-    Pick<ActivityRow, 'id' | 'type' | 'status' | 'started_at' | 'ended_at' | 'distance_meters' | 'active_duration_seconds' | 'elapsed_duration_seconds'>
+    Pick<
+      ActivityRow,
+      | 'id'
+      | 'type'
+      | 'status'
+      | 'started_at'
+      | 'ended_at'
+      | 'distance_meters'
+      | 'active_duration_seconds'
+      | 'elapsed_duration_seconds'
+      | 'walk_distance_meters'
+      | 'run_distance_meters'
+    >
   >(
-    `SELECT id, type, status, started_at, ended_at, distance_meters, active_duration_seconds, elapsed_duration_seconds
+    `SELECT id, type, status, started_at, ended_at, distance_meters, active_duration_seconds, elapsed_duration_seconds,
+       walk_distance_meters, run_distance_meters
      FROM activities WHERE status = 'completed' ORDER BY started_at ASC, id ASC`,
     [],
   );
@@ -122,7 +143,18 @@ export async function listActivitySummaries(db: SqlDatabase): Promise<ActivitySu
     distanceMeters: row.distance_meters,
     activeDurationSeconds: row.active_duration_seconds,
     elapsedDurationSeconds: row.elapsed_duration_seconds,
+    walkDistanceMeters: row.walk_distance_meters,
+    runDistanceMeters: row.run_distance_meters,
   }));
+}
+
+/** Total distance of the completed activities that started in [fromMs, toMs). */
+export async function sumCompletedDistance(db: SqlDatabase, fromMs: number, toMs: number): Promise<number> {
+  const row = await db.getFirstAsync<{ total: number | null }>(
+    "SELECT SUM(distance_meters) AS total FROM activities WHERE status = 'completed' AND started_at >= ? AND started_at < ?",
+    [fromMs, toMs],
+  );
+  return row?.total ?? 0;
 }
 
 export async function listUnfinishedActivities(db: SqlDatabase): Promise<Activity[]> {
@@ -140,22 +172,42 @@ export async function updateActivityStatus(db: SqlDatabase, id: number, status: 
 export async function updateLiveProgress(
   db: SqlDatabase,
   id: number,
-  progress: { distanceMeters: number; elapsedSeconds: number | null; activeSeconds: number | null },
+  progress: {
+    distanceMeters: number;
+    walkDistanceMeters: number;
+    runDistanceMeters: number;
+    elapsedSeconds: number | null;
+    activeSeconds: number | null;
+  },
 ): Promise<void> {
   await db.runAsync(
     `UPDATE activities
-     SET distance_meters = ?, elapsed_duration_seconds = COALESCE(?, elapsed_duration_seconds),
+     SET distance_meters = ?, walk_distance_meters = ?, run_distance_meters = ?,
+         elapsed_duration_seconds = COALESCE(?, elapsed_duration_seconds),
          active_duration_seconds = COALESCE(?, active_duration_seconds), updated_at = ?
      WHERE id = ? AND status != 'completed'`,
-    [progress.distanceMeters, progress.elapsedSeconds, progress.activeSeconds, Date.now(), id],
+    [
+      progress.distanceMeters,
+      progress.walkDistanceMeters,
+      progress.runDistanceMeters,
+      progress.elapsedSeconds,
+      progress.activeSeconds,
+      Date.now(),
+      id,
+    ],
   );
 }
 
 export type ActivityFinalization = {
+  type: ActivityType;
   endedAt: number;
   elapsedDurationSeconds: number;
   activeDurationSeconds: number;
   distanceMeters: number;
+  walkDistanceMeters: number;
+  runDistanceMeters: number;
+  walkActiveSeconds: number;
+  runActiveSeconds: number;
   averagePaceSecondsPerKm: number | null;
   averageSpeedMps: number | null;
   gpsQualitySummary: GpsQualitySummary;
@@ -164,15 +216,21 @@ export type ActivityFinalization = {
 
 export async function completeActivity(db: SqlDatabase, id: number, data: ActivityFinalization): Promise<void> {
   await db.runAsync(
-    `UPDATE activities SET status = 'completed', ended_at = ?, elapsed_duration_seconds = ?, active_duration_seconds = ?,
-       distance_meters = ?, average_pace_seconds_per_km = ?, average_speed_mps = ?, gps_quality_summary = ?,
-       route_preview = ?, updated_at = ?
+    `UPDATE activities SET status = 'completed', type = ?, ended_at = ?, elapsed_duration_seconds = ?,
+       active_duration_seconds = ?, distance_meters = ?, walk_distance_meters = ?, run_distance_meters = ?,
+       walk_active_seconds = ?, run_active_seconds = ?, average_pace_seconds_per_km = ?, average_speed_mps = ?,
+       gps_quality_summary = ?, route_preview = ?, updated_at = ?
      WHERE id = ?`,
     [
+      data.type,
       data.endedAt,
       data.elapsedDurationSeconds,
       data.activeDurationSeconds,
       data.distanceMeters,
+      data.walkDistanceMeters,
+      data.runDistanceMeters,
+      data.walkActiveSeconds,
+      data.runActiveSeconds,
       data.averagePaceSecondsPerKm,
       data.averageSpeedMps,
       JSON.stringify(data.gpsQualitySummary),
@@ -183,8 +241,27 @@ export async function completeActivity(db: SqlDatabase, id: number, data: Activi
   );
 }
 
+/** Makes the whole workout one type: every part, total and route point moves to `type`. */
 export async function updateActivityType(db: SqlDatabase, id: number, type: ActivityType): Promise<void> {
-  await db.runAsync('UPDATE activities SET type = ?, updated_at = ? WHERE id = ?', [type, Date.now(), id]);
+  const walk = type === 'walk' ? 1 : 0;
+  await db.runAsync(
+    `UPDATE activities SET type = ?,
+       walk_distance_meters = distance_meters * ?, run_distance_meters = distance_meters * ?,
+       walk_active_seconds = COALESCE(active_duration_seconds, 0) * ?,
+       run_active_seconds = COALESCE(active_duration_seconds, 0) * ?, updated_at = ?
+     WHERE id = ?`,
+    [type, walk, 1 - walk, walk, 1 - walk, Date.now(), id],
+  );
+  await db.runAsync('UPDATE route_points SET activity_type = ? WHERE activity_id = ?', [type, id]);
+}
+
+/** The type of a workout while it records; the main type is settled when it is saved. */
+export async function updateLiveType(db: SqlDatabase, id: number, type: ActivityType): Promise<void> {
+  await db.runAsync("UPDATE activities SET type = ?, updated_at = ? WHERE id = ? AND status != 'completed'", [
+    type,
+    Date.now(),
+    id,
+  ]);
 }
 
 export async function updateActivityNotes(db: SqlDatabase, id: number, notes: string | null): Promise<void> {

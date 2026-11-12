@@ -4,23 +4,29 @@ import type { Measurement } from '@/features/tracking/gpsFilter';
 import type { TrackingNativeApi } from '@/features/tracking/trackingEngine';
 
 type State = 'recording' | 'paused' | 'interrupted' | 'finished';
+type ActivityType = 'walk' | 'run';
 
 type Session = {
   activityId: number;
-  activityType: 'walk' | 'run';
+  activityType: ActivityType;
   state: State;
   segmentIndex: number;
   activeMs: number;
+  runActiveMs: number;
   elapsedMs: number;
   startedAtWallMs: number;
   finishedAtWallMs: number | null;
   interruptionReason: string | null;
+  autoPauseEnabled: boolean;
+  autoPaused: boolean;
+  intervals: { runMs: number; walkMs: number; repeats: number } | null;
 };
 
 type JournalEntry = {
   sequence: number;
   activityId: number;
   segmentIndex: number;
+  activityType: ActivityType;
   latitude: number;
   longitude: number;
   wallTimeMs: number;
@@ -38,7 +44,8 @@ type Listener = (payload: unknown) => void;
 /**
  * In-memory stand-in for the Kotlin module with the same session semantics: a journal that only
  * accepts fixes while recording, a segment index that increments on resume, frozen durations on
- * finish, and a session that survives JS "restarts" (a new engine on the same instance).
+ * finish, a session that survives JS "restarts" (a new engine on the same instance), walk/run
+ * parts with separate run time, auto-pause, and interval phases that switch the part.
  */
 export class FakeNative implements TrackingNativeApi {
   session: Session | null = null;
@@ -62,6 +69,12 @@ export class FakeNative implements TrackingNativeApi {
       state: s?.state ?? 'idle',
       elapsedMs: s?.elapsedMs ?? null,
       activeMs: s?.activeMs ?? null,
+      runActiveMs: s?.runActiveMs ?? null,
+      autoPaused: s?.autoPaused ?? false,
+      autoPauseEnabled: s?.autoPauseEnabled ?? false,
+      intervalRunMs: s?.intervals?.runMs ?? null,
+      intervalWalkMs: s?.intervals?.walkMs ?? null,
+      intervalRepeats: s?.intervals?.repeats ?? null,
       startedAtWallMs: s?.startedAtWallMs ?? null,
       finishedAtWallMs: s?.finishedAtWallMs ?? null,
       segmentIndex: s?.segmentIndex ?? null,
@@ -83,16 +96,24 @@ export class FakeNative implements TrackingNativeApi {
 
   async startTrackingAsync(options: StartTrackingOptions) {
     if (this.session && this.session.state !== 'finished') throw new Error('ERR_ALREADY_TRACKING');
+    const run = options.intervalRunSeconds ?? 0;
+    const walk = options.intervalWalkSeconds ?? 0;
+    const repeats = options.intervalRepeats ?? 0;
+    const intervals = run > 0 && walk > 0 && repeats > 0 ? { runMs: run * 1000, walkMs: walk * 1000, repeats } : null;
     this.session = {
       activityId: options.activityId,
-      activityType: options.activityType,
+      activityType: intervals ? 'run' : options.activityType,
       state: 'recording',
       segmentIndex: 0,
       activeMs: 0,
+      runActiveMs: 0,
       elapsedMs: 0,
       startedAtWallMs: this.clock.now,
       finishedAtWallMs: null,
       interruptionReason: null,
+      autoPauseEnabled: options.autoPause === true,
+      autoPaused: false,
+      intervals,
     };
     this.serviceRunning = true;
     return this.status();
@@ -100,7 +121,10 @@ export class FakeNative implements TrackingNativeApi {
 
   async pauseTrackingAsync() {
     if (!this.session) throw new Error('ERR_NO_SESSION');
-    if (this.session.state === 'recording') this.session.state = 'paused';
+    if (this.session.state === 'recording') {
+      this.session.state = 'paused';
+      this.session.autoPaused = false;
+    }
     return this.status();
   }
 
@@ -110,6 +134,7 @@ export class FakeNative implements TrackingNativeApi {
       this.session.state = 'recording';
       this.session.segmentIndex += 1;
       this.session.interruptionReason = null;
+      this.session.autoPaused = false;
       this.serviceRunning = true;
     }
     return this.status();
@@ -120,6 +145,19 @@ export class FakeNative implements TrackingNativeApi {
     this.session.state = 'finished';
     this.session.finishedAtWallMs = this.clock.now;
     this.serviceRunning = false;
+    return this.status();
+  }
+
+  async switchActivityTypeAsync(activityType: ActivityType) {
+    if (!this.session) throw new Error('ERR_NO_SESSION');
+    if (this.session.state === 'recording' || this.session.state === 'paused') this.session.activityType = activityType;
+    return this.status();
+  }
+
+  async setAutoPauseAsync(enabled: boolean) {
+    if (!this.session) throw new Error('ERR_NO_SESSION');
+    this.session.autoPauseEnabled = enabled;
+    if (!enabled) this.session.autoPaused = false;
     return this.status();
   }
 
@@ -170,6 +208,7 @@ export class FakeNative implements TrackingNativeApi {
       sequence: this.nextSequence++,
       activityId: session.activityId,
       segmentIndex: session.segmentIndex,
+      activityType: session.activityType,
       latitude: measurement.latitude,
       longitude: measurement.longitude,
       wallTimeMs: measurement.wallTimeMs,
@@ -186,13 +225,36 @@ export class FakeNative implements TrackingNativeApi {
     return entry;
   }
 
-  /** Advances the session clock the way SystemClock would. */
+  /**
+   * Advances the session clock the way SystemClock would. Interval phases switch the part at
+   * their boundaries (advance in steps no longer than a phase to see each switch).
+   */
   advance(ms: number) {
     this.clock.now += ms;
     const session = this.session;
     if (!session || session.state === 'finished' || session.state === 'interrupted') return;
     session.elapsedMs += ms;
-    if (session.state === 'recording') session.activeMs += ms;
+    if (session.state !== 'recording' || session.autoPaused) return;
+    session.activeMs += ms;
+    if (session.activityType === 'run') session.runActiveMs += ms;
+    const plan = session.intervals;
+    if (plan) {
+      const cycle = plan.runMs + plan.walkMs;
+      if (session.activeMs < cycle * plan.repeats) {
+        const type = session.activeMs % cycle < plan.runMs ? 'run' : 'walk';
+        if (type !== session.activityType) {
+          session.activityType = type;
+          this.emitStatus();
+        }
+      }
+    }
+  }
+
+  /** What the service does when it detects standing still (or moving again). */
+  setAutoPaused(paused: boolean) {
+    if (!this.session || this.session.state !== 'recording' || !this.session.autoPauseEnabled) return;
+    this.session.autoPaused = paused;
+    this.emitStatus();
   }
 
   /** The process died: the service is gone and the session is marked interrupted. */
@@ -200,6 +262,7 @@ export class FakeNative implements TrackingNativeApi {
     if (!this.session) return;
     this.session.state = 'interrupted';
     this.session.interruptionReason = reason;
+    this.session.autoPaused = false;
     this.serviceRunning = false;
   }
 

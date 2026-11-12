@@ -1,27 +1,15 @@
-import { Inter_400Regular } from '@expo-google-fonts/inter/400Regular';
-import { Inter_500Medium } from '@expo-google-fonts/inter/500Medium';
-import { Inter_600SemiBold } from '@expo-google-fonts/inter/600SemiBold';
-import { Inter_700Bold } from '@expo-google-fonts/inter/700Bold';
-import { JetBrainsMono_500Medium } from '@expo-google-fonts/jetbrains-mono/500Medium';
-import { JetBrainsMono_700Bold } from '@expo-google-fonts/jetbrains-mono/700Bold';
-import { SpaceGrotesk_500Medium } from '@expo-google-fonts/space-grotesk/500Medium';
-import { SpaceGrotesk_600SemiBold } from '@expo-google-fonts/space-grotesk/600SemiBold';
-import { SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk/700Bold';
-import { Unbounded_700Bold } from '@expo-google-fonts/unbounded/700Bold';
-
 /**
- * The faces the app uses, keyed by the family names in `Fonts` (theme.ts). Imported per weight:
- * each package's root module requires every weight, which would bundle ~11 MB of unused fonts.
+ * The faces the app uses, keyed by the family names in `Fonts` (theme.ts). The files are Latin
+ * subsets of the Google Fonts releases made by scripts/subset-fonts.js (licences next to them in
+ * assets/fonts/); Android draws any character they lack with the system font.
  */
 export const FONT_ASSETS = {
-  Unbounded_700Bold,
-  SpaceGrotesk_500Medium,
-  SpaceGrotesk_600SemiBold,
-  SpaceGrotesk_700Bold,
-  Inter_400Regular,
-  Inter_500Medium,
-  Inter_600SemiBold,
-  Inter_700Bold,
-  JetBrainsMono_500Medium,
-  JetBrainsMono_700Bold,
+  Unbounded_700Bold: require('../../assets/fonts/Unbounded_700Bold.ttf'),
+  SpaceGrotesk_500Medium: require('../../assets/fonts/SpaceGrotesk_500Medium.ttf'),
+  SpaceGrotesk_600SemiBold: require('../../assets/fonts/SpaceGrotesk_600SemiBold.ttf'),
+  SpaceGrotesk_700Bold: require('../../assets/fonts/SpaceGrotesk_700Bold.ttf'),
+  Inter_400Regular: require('../../assets/fonts/Inter_400Regular.ttf'),
+  Inter_600SemiBold: require('../../assets/fonts/Inter_600SemiBold.ttf'),
+  JetBrainsMono_500Medium: require('../../assets/fonts/JetBrainsMono_500Medium.ttf'),
+  JetBrainsMono_700Bold: require('../../assets/fonts/JetBrainsMono_700Bold.ttf'),
 };

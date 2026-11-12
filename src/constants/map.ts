@@ -1,8 +1,8 @@
 /**
  * Map tiles: OpenFreeMap (https://openfreemap.org) — free vector tiles built from OpenStreetMap
- * data, with no API key, registration or view limits. Rendered by MapLibre Native, which shows
- * the required "OpenFreeMap © OpenMapTiles Data from OpenStreetMap" attribution automatically
- * (keep the attribution button enabled).
+ * data, with no API key, registration or view limits. Rendered by MapLibre GL JS inside a WebView
+ * (src/components/RouteMap.tsx), which shows the required "OpenFreeMap © OpenMapTiles Data from
+ * OpenStreetMap" attribution behind its (i) button (keep the attribution control).
  *
  * To use another provider or a self-hosted style, change these URLs to any MapLibre style JSON.
  */

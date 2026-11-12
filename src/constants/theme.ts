@@ -96,13 +96,15 @@ export function glow(color: string, scheme: 'light' | 'dark', opacity = 0.4) {
 }
 
 /**
- * Font faces, loaded at startup from @expo-google-fonts (src/constants/fonts.ts). Each weight is
- * its own family so Android never synthesises bold on top of an already bold face.
+ * Font faces, loaded at startup from assets/fonts (src/constants/fonts.ts). Each weight is its
+ * own family so Android never synthesises bold on top of an already bold face. Body text has
+ * two weights only (each Inter face adds ~165 KB to the APK): medium renders as regular and bold
+ * as semibold.
  */
 export const Fonts = {
   display: 'Unbounded_700Bold',
   number: { 500: 'SpaceGrotesk_500Medium', 600: 'SpaceGrotesk_600SemiBold', 700: 'SpaceGrotesk_700Bold' },
-  body: { 400: 'Inter_400Regular', 500: 'Inter_500Medium', 600: 'Inter_600SemiBold', 700: 'Inter_700Bold' },
+  body: { 400: 'Inter_400Regular', 600: 'Inter_600SemiBold' },
   mono: { 500: 'JetBrainsMono_500Medium', 700: 'JetBrainsMono_700Bold' },
 } as const;
 

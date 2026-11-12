@@ -55,8 +55,7 @@ export async function reconcileAchievements(db: SqlDatabase, earned: EarnedAchie
     const metadata = JSON.stringify(achievement.metadata);
     if (!current) {
       await db.runAsync(
-        `INSERT INTO achievements (achievement_type, unlocked_at, activity_id, metadata_json) VALUES (?, ?, ?, ?)
-         ON CONFLICT (achievement_type) DO NOTHING`,
+        'INSERT OR IGNORE INTO achievements (achievement_type, unlocked_at, activity_id, metadata_json) VALUES (?, ?, ?, ?)',
         [achievement.type, achievement.unlockedAt, achievement.activityId, metadata],
       );
       unlocked.push(achievement.type);

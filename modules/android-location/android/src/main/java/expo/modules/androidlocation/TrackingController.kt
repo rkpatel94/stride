@@ -2,14 +2,13 @@ package expo.modules.androidlocation
 
 import android.content.Context
 import android.os.SystemClock
-import kotlin.math.max
 
 class TrackingStateException(val code: String, message: String) : IllegalStateException(message)
 
 /**
  * The only place that mutates [TrackingSession]. Both the JS module and the foreground service
- * (notification actions, system restarts) go through these synchronized transitions, so the
- * persisted state can never be updated from two places at once.
+ * (notification actions, auto-pause, intervals, system restarts) go through these synchronized
+ * transitions, so the persisted state can never be updated from two places at once.
  */
 object TrackingController {
   /**
@@ -29,7 +28,9 @@ object TrackingController {
     activityType: String,
     intervalMs: Long,
     openUri: String?,
-    finishUri: String?
+    finishUri: String?,
+    autoPauseEnabled: Boolean,
+    intervals: IntervalPlan?
   ): TrackingSession {
     val store = SessionStore(context)
     val existing = store.load()
@@ -48,14 +49,17 @@ object TrackingController {
     }
     val nowElapsed = SystemClock.elapsedRealtime()
     val nowWall = System.currentTimeMillis()
+    val plan = intervals?.takeIf { it.isValid() }
     val session = TrackingSession(
       activityId = activityId,
-      activityType = activityType,
+      // Intervals start with a run.
+      activityType = if (plan != null) "run" else activityType,
       state = SessionState.RECORDING,
       startedAtWallMs = nowWall,
       startedElapsedMs = nowElapsed,
       bootCount = DeviceStatus.bootCount(context),
       accumulatedActiveMs = 0L,
+      accumulatedRunActiveMs = 0L,
       runStartedElapsedMs = nowElapsed,
       segmentIndex = 0,
       lastHeartbeatElapsedMs = nowElapsed,
@@ -68,7 +72,10 @@ object TrackingController {
       distanceMeters = 0.0,
       intervalMs = intervalMs,
       openUri = openUri,
-      finishUri = finishUri
+      finishUri = finishUri,
+      autoPauseEnabled = autoPauseEnabled,
+      autoPaused = false,
+      intervals = plan
     )
     persist(store, session)
     startPending = true
@@ -83,10 +90,9 @@ object TrackingController {
     val now = SystemClock.elapsedRealtime()
     return persist(
       store,
-      session.copy(
+      session.closedAt(now).copy(
         state = SessionState.PAUSED,
-        accumulatedActiveMs = session.activeMs(now),
-        runStartedElapsedMs = null,
+        autoPaused = false,
         lastHeartbeatElapsedMs = now,
         lastHeartbeatWallMs = System.currentTimeMillis()
       )
@@ -105,6 +111,7 @@ object TrackingController {
       session.copy(
         state = SessionState.RECORDING,
         runStartedElapsedMs = now,
+        autoPaused = false,
         segmentIndex = session.segmentIndex + 1,
         lastHeartbeatElapsedMs = now,
         lastHeartbeatWallMs = System.currentTimeMillis()
@@ -134,6 +141,7 @@ object TrackingController {
         startedElapsedMs = startedElapsed,
         bootCount = currentBoot,
         runStartedElapsedMs = if (resumeRecording) now else null,
+        autoPaused = false,
         segmentIndex = session.segmentIndex + 1,
         lastHeartbeatElapsedMs = now,
         lastHeartbeatWallMs = System.currentTimeMillis(),
@@ -150,18 +158,11 @@ object TrackingController {
     val store = SessionStore(context)
     val session = store.load() ?: return null
     if (!session.isActive) return session
-    val runClosedAt = session.lastHeartbeatElapsedMs
-    val active = if (session.state == SessionState.RECORDING && session.runStartedElapsedMs != null) {
-      session.accumulatedActiveMs + max(0L, runClosedAt - session.runStartedElapsedMs)
-    } else {
-      session.accumulatedActiveMs
-    }
     return persist(
       store,
-      session.copy(
+      session.closedAt(session.lastHeartbeatElapsedMs).copy(
         state = SessionState.INTERRUPTED,
-        accumulatedActiveMs = active,
-        runStartedElapsedMs = null,
+        autoPaused = false,
         interruptionReason = reason,
         stateBeforeInterruption = session.state
       )
@@ -178,14 +179,54 @@ object TrackingController {
     val now = SystemClock.elapsedRealtime()
     return persist(
       store,
-      session.copy(
+      session.closedAt(now).copy(
         state = SessionState.FINISHED,
-        accumulatedActiveMs = session.activeMs(now),
-        runStartedElapsedMs = null,
+        autoPaused = false,
         finishedElapsedMs = if (interrupted) session.lastHeartbeatElapsedMs else now,
         finishedAtWallMs = if (interrupted) session.lastHeartbeatWallMs else System.currentTimeMillis()
       )
     )
+  }
+
+  /** Starts a walking or running part from now on; the active time so far stays with the old part. */
+  @Synchronized
+  fun switchType(context: Context, activityType: String): TrackingSession? {
+    val store = SessionStore(context)
+    val session = store.load() ?: return null
+    if (!session.isActive || session.activityType == activityType) return session
+    val now = SystemClock.elapsedRealtime()
+    val reopen = session.runStartedElapsedMs != null
+    val switched = session.closedAt(now).copy(activityType = activityType)
+    return persist(store, if (reopen) switched.copy(runStartedElapsedMs = now) else switched)
+  }
+
+  /**
+   * Stops or restarts the active clock while recording. [atElapsedMs] is when the phone stopped
+   * (or started) moving, so the standing time is not counted at all.
+   */
+  @Synchronized
+  fun setAutoPaused(context: Context, paused: Boolean, atElapsedMs: Long): TrackingSession? {
+    val store = SessionStore(context)
+    val session = store.load() ?: return null
+    if (session.state != SessionState.RECORDING || session.autoPaused == paused) return session
+    val updated = if (paused) {
+      session.closedAt(atElapsedMs).copy(autoPaused = true)
+    } else {
+      session.copy(autoPaused = false, runStartedElapsedMs = atElapsedMs)
+    }
+    return persist(store, updated)
+  }
+
+  @Synchronized
+  fun setAutoPauseEnabled(context: Context, enabled: Boolean): TrackingSession? {
+    val store = SessionStore(context)
+    val session = store.load() ?: return null
+    if (session.autoPauseEnabled == enabled) return session
+    var updated = session.copy(autoPauseEnabled = enabled)
+    if (!enabled && session.autoPaused) {
+      updated = updated.copy(autoPaused = false, runStartedElapsedMs = SystemClock.elapsedRealtime())
+    }
+    return persist(store, updated)
   }
 
   @Synchronized

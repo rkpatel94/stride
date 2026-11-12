@@ -12,9 +12,11 @@ type GoalProgressBarProps = {
   progress: GoalProgress | null;
   /** Share of the goal covered by walking (the rest of the filled bar is running). */
   walkMeters?: number;
+  /** What the bar measures, for screen readers. */
+  label?: string;
 };
 
-export function GoalProgressBar({ progress, walkMeters = 0 }: GoalProgressBarProps) {
+export function GoalProgressBar({ progress, walkMeters = 0, label = 'Daily goal progress' }: GoalProgressBarProps) {
   const theme = useTheme();
   if (!progress) {
     return (
@@ -28,7 +30,7 @@ export function GoalProgressBar({ progress, walkMeters = 0 }: GoalProgressBarPro
       style={styles.container}
       accessible
       accessibilityRole="progressbar"
-      accessibilityLabel="Daily goal progress"
+      accessibilityLabel={label}
       accessibilityValue={{ min: 0, max: 100, now: Math.round(progress.fraction * 100) }}>
       <View style={styles.header}>
         <AppText variant="metric">{formatPercent(progress.fraction)}</AppText>

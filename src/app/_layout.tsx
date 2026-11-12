@@ -92,6 +92,7 @@ export default function RootLayout() {
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="activity/[id]" options={{ title: 'Activity' }} />
         <Stack.Screen name="goals" options={{ title: 'Goals & achievements' }} />
+        <Stack.Screen name="routes" options={{ title: 'All your routes' }} />
         <Stack.Screen name="diagnostics" options={{ title: 'Diagnostics' }} />
       </Stack>
     </ThemeProvider>

@@ -3,13 +3,8 @@
   "version": "1.0.0",
   "main": "expo-router/entry",
   "dependencies": {
-    "@expo-google-fonts/inter": "^0.4.2",
-    "@expo-google-fonts/jetbrains-mono": "^0.4.1",
-    "@expo-google-fonts/space-grotesk": "^0.4.1",
-    "@expo-google-fonts/unbounded": "^0.4.1",
-    "@expo/vector-icons": "^15.0.2",
-    "@maplibre/maplibre-react-native": "^11.5.0",
     "expo": "~58.0.16",
+    "expo-build-properties": "~58.0.12",
     "expo-constants": "~58.0.12",
     "expo-document-picker": "~58.0.4",
     "expo-file-system": "~58.0.10",
@@ -20,17 +15,20 @@
     "expo-router": "~58.0.24",
     "expo-sharing": "~58.0.19",
     "expo-splash-screen": "~58.0.10",
-    "expo-sqlite": "~58.0.13",
     "expo-status-bar": "~58.0.3",
     "expo-system-ui": "~58.0.6",
     "react": "19.3.0",
     "react-native": "0.88.0",
-    "react-native-gifted-charts": "^1.4.81",
     "react-native-safe-area-context": "~5.10.1",
     "react-native-screens": "~4.30.0",
-    "react-native-svg": "15.16.0"
+    "react-native-svg": "15.16.0",
+    "react-native-webview": "14.0.1"
   },
   "devDependencies": {
+    "@expo-google-fonts/inter": "^0.4.2",
+    "@expo-google-fonts/jetbrains-mono": "^0.4.1",
+    "@expo-google-fonts/space-grotesk": "^0.4.1",
+    "@expo-google-fonts/unbounded": "^0.4.1",
     "@testing-library/react-native": "^14.1.0",
     "@types/geojson": "^7946.0.16",
     "@types/jest": "30.0.0",
@@ -39,6 +37,7 @@
     "eslint-config-expo": "~58.0.4",
     "jest": "~30.5.2",
     "jest-expo": "~58.0.11",
+    "maplibre-gl": "5.24.0",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -49,6 +48,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "typecheck": "tsc --noEmit",
+    "vendor:maplibre": "node scripts/vendor-maplibre.js",
+    "fonts:subset": "node scripts/subset-fonts.js",
     "lint": "expo lint"
   },
   "private": true,

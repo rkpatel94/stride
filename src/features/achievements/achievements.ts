@@ -1,5 +1,5 @@
 import type { ActivitySummary } from '@/features/activities/types';
-import { goalInEffect, type Goal } from '@/features/goals/goals';
+import { goalForPeriod, goalInEffect, type Goal } from '@/features/goals/goals';
 import { isCompleted, isEligible } from '@/features/statistics/statistics';
 import {
   DEFAULT_WEEK_START,
@@ -25,6 +25,8 @@ export type AchievementType =
   | 'first_25k_week'
   | 'first_100k_month'
   | 'daily_goal_completed'
+  | 'weekly_goal_completed'
+  | 'monthly_goal_completed'
   | 'streak_7_days'
   | 'personal_best_distance';
 
@@ -43,7 +45,9 @@ export const ACHIEVEMENTS: AchievementDefinition[] = [
   { type: 'first_10k', title: 'First 10K', description: 'Cover 10 km in a single activity.', icon: 'military_tech' },
   { type: 'first_25k_week', title: '25 km week', description: 'Cover 25 km in one calendar week.', icon: 'date_range' },
   { type: 'first_100k_month', title: '100 km month', description: 'Cover 100 km in one calendar month.', icon: 'calendar_month' },
-  { type: 'daily_goal_completed', title: 'Goal reached', description: 'Reach your daily distance goal.', icon: 'task_alt' },
+  { type: 'daily_goal_completed', title: 'Daily goal reached', description: 'Reach your daily distance goal.', icon: 'task_alt' },
+  { type: 'weekly_goal_completed', title: 'Weekly goal reached', description: 'Reach your weekly distance goal.', icon: 'event_available' },
+  { type: 'monthly_goal_completed', title: 'Monthly goal reached', description: 'Reach your monthly distance goal.', icon: 'calendar_today' },
   { type: 'streak_7_days', title: 'Seven-day streak', description: 'Be active seven days in a row.', icon: 'local_fire_department' },
   {
     type: 'personal_best_distance',
@@ -92,11 +96,19 @@ export function evaluateAchievements(
     const weekTotal = (weekTotals.get(week) ?? 0) + distance;
     weekTotals.set(week, weekTotal);
     if (weekTotal >= 25_000) unlock('first_25k_week', activity, { weekStart: week, distanceMeters: weekTotal });
+    const weekGoal = goalForPeriod(goals, 'weekly', activity.startedAt, weekStartsOn);
+    if (weekGoal && weekTotal >= weekGoal.targetDistanceMeters) {
+      unlock('weekly_goal_completed', activity, { weekStart: week, targetMeters: weekGoal.targetDistanceMeters });
+    }
 
     const month = startOfLocalMonth(activity.startedAt);
     const monthTotal = (monthTotals.get(month) ?? 0) + distance;
     monthTotals.set(month, monthTotal);
     if (monthTotal >= 100_000) unlock('first_100k_month', activity, { monthStart: month, distanceMeters: monthTotal });
+    const monthGoal = goalForPeriod(goals, 'monthly', activity.startedAt, weekStartsOn);
+    if (monthGoal && monthTotal >= monthGoal.targetDistanceMeters) {
+      unlock('monthly_goal_completed', activity, { monthStart: month, targetMeters: monthGoal.targetDistanceMeters });
+    }
 
     const day = localDayKey(activity.startedAt);
     const dayTotal = (dayTotals.get(day) ?? 0) + distance;

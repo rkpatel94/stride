@@ -1,4 +1,4 @@
-import { createFilterState, processMeasurement, restoreFilterState, runFilter } from '@/features/tracking/gpsFilter';
+import { createFilterState, processMeasurement, restoreFilterState, runFilter, type Measurement } from '@/features/tracking/gpsFilter';
 import { filterConfigFor } from '@/features/tracking/trackingConfig';
 import { destinationPoint, haversineDistanceMeters } from '@/utils/geo';
 
@@ -210,6 +210,37 @@ describe('pause and resume', () => {
     expect(state.quality.gapCount).toBe(0);
     expect(state.totalDistanceMeters).toBeGreaterThan(190);
     expect(state.totalDistanceMeters).toBeLessThan(210);
+  });
+});
+
+describe('recovery after a reboot', () => {
+  // elapsedRealtime restarts near zero when the phone reboots; recovery always opens a new segment.
+  const afterReboot = (measurement: Measurement, elapsedRealtimeMs: number): Measurement => ({ ...measurement, elapsedRealtimeMs });
+
+  it('keeps measuring in the new segment although its timestamps are lower than before', () => {
+    const before = routeTrace([{ bearing: 0, meters: 200 }], 1.4, { seed: 23, segmentIndex: 0 });
+    const after = routeTrace([{ bearing: 0, meters: 200 }], 1.4, {
+      seed: 24,
+      segmentIndex: 1,
+      start: destinationPoint(before.end, 50, 90),
+      startSecond: before.endSecond + 300,
+    }).fixes.map((measurement, index) => afterReboot(measurement, 30_000 + index * 1000));
+    const { state, decisions } = runFilter([...before.fixes, ...after], config);
+    const afterDecisions = decisions.slice(before.fixes.length);
+    expect(afterDecisions.filter((decision) => decision.rejectionReason === 'out_of_order')).toHaveLength(0);
+    expect(afterDecisions[0].startsNewLine).toBe(true);
+    expect(afterDecisions[0].segmentDistanceMeters).toBe(0);
+    expect(state.totalDistanceMeters).toBeGreaterThan(380);
+    expect(state.totalDistanceMeters).toBeLessThan(420);
+  });
+
+  it('still rejects out-of-order fixes inside the new segment', () => {
+    const beforeReboot = fix(ORIGIN, 0, { speed: 1.4 });
+    const a = afterReboot(fix(destinationPoint(ORIGIN, 100, 0), 600, { speed: 1.4, segmentIndex: 1 }), 20_000);
+    const b = afterReboot(fix(destinationPoint(ORIGIN, 107, 0), 605, { speed: 1.4, segmentIndex: 1 }), 25_000);
+    const late = afterReboot(fix(destinationPoint(ORIGIN, 103, 0), 602, { speed: 1.4, segmentIndex: 1 }), 22_000);
+    const { decisions } = runFilter([beforeReboot, a, b, late], config);
+    expect(decisions.map((decision) => decision.rejectionReason)).toEqual([null, null, null, 'out_of_order']);
   });
 });
 

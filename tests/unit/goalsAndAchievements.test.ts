@@ -12,6 +12,8 @@ const activity = (start: Date, distanceMeters: number, activeSeconds = 1800, ove
   distanceMeters,
   activeDurationSeconds: activeSeconds,
   elapsedDurationSeconds: activeSeconds,
+  walkDistanceMeters: overrides.type === 'run' ? 0 : distanceMeters,
+  runDistanceMeters: overrides.type === 'run' ? distanceMeters : 0,
   ...overrides,
 });
 

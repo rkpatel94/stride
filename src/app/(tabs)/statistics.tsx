@@ -6,6 +6,7 @@ import { AppText } from '@/components/AppText';
 import { Card } from '@/components/Card';
 import { DistanceBarChart } from '@/components/DistanceBarChart';
 import { Banner, EmptyState, LoadingState, SectionHeader } from '@/components/Feedback';
+import { Icon } from '@/components/Icon';
 import { MetricCard } from '@/components/MetricCard';
 import { Screen } from '@/components/Screen';
 import { SegmentedControl } from '@/components/SegmentedControl';
@@ -123,6 +124,17 @@ export default function StatisticsScreen() {
             </AppText>
           </Card>
 
+          <Card onPress={() => router.push('/routes')} accessibilityLabel="Map of all your routes" style={styles.linkCard}>
+            <Icon name="map-outline" size={24} color={theme.accent} />
+            <View style={styles.flex}>
+              <AppText weight="600">Map of all your routes</AppText>
+              <AppText variant="caption" color="textSecondary">
+                Every walk and run on one map.
+              </AppText>
+            </View>
+            <Icon name="chevron-right" size={24} color={theme.textMuted} />
+          </Card>
+
           <SectionHeader title="Records" actionLabel="Achievements" onAction={() => router.push('/goals')} />
           <Card>
             <RecordRow
@@ -191,5 +203,6 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   totalRow: { flexDirection: 'row', alignItems: 'baseline', gap: Spacing.sm },
   grid: { flexDirection: 'row', gap: Spacing.md },
+  linkCard: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
   recordRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', minHeight: 36, gap: Spacing.md },
 });

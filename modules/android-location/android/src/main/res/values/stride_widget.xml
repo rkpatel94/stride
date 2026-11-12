@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Home-screen widget (StrideWidget.kt); colours follow the app's light theme. -->
+    <color name="stride_widget_background">#FFFFFF</color>
+    <color name="stride_widget_track">#ECEAE3</color>
+    <color name="stride_widget_text">#0A0B0F</color>
+    <color name="stride_widget_muted">#646878</color>
+    <color name="stride_widget_accent">#4A6B00</color>
+    <color name="stride_widget_primary">#C6FF3D</color>
+    <color name="stride_widget_on_accent">#0A0B0F</color>
+    <color name="stride_widget_walk">#0A72C2</color>
+    <color name="stride_widget_walk_surface">#E2F0FA</color>
+    <color name="stride_widget_run">#C2410C</color>
+    <color name="stride_widget_run_surface">#FBE9E1</color>
+
+    <string name="stride_widget_label">Stride</string>
+    <string name="stride_widget_description">Today\'s distance, your daily goal and quick start buttons.</string>
+    <string name="stride_widget_today">Today</string>
+    <string name="stride_widget_walk">Walk</string>
+    <string name="stride_widget_run">Run</string>
+    <string name="stride_widget_open">Open workout</string>
+</resources>

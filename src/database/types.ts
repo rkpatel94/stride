@@ -1,6 +1,9 @@
 /**
- * The subset of expo-sqlite's SQLiteDatabase that repositories use. Keeping repositories on
- * this interface lets the integration tests run them against Node's built-in SQLite.
+ * The database operations repositories use. The app implements it over Android's built-in SQLite
+ * (database.ts); the integration tests implement it over Node's built-in SQLite.
+ *
+ * SQL must run on the SQLite of Android 7 (3.9): no upsert clauses, window functions or returning
+ * clauses. tests/unit/sqlCompatibility.test.ts checks the source for them.
  */
 export type SqlValue = string | number | null;
 

@@ -13,13 +13,14 @@ import { RouteThumbnail } from '@/components/RouteThumbnail';
 import { Screen } from '@/components/Screen';
 import { glow, Radius, Spacing, withAlpha } from '@/constants/theme';
 import { definitionFor } from '@/features/achievements/achievements';
+import type { GoalProgress } from '@/features/goals/goals';
 import { loadDashboard, type DashboardData } from '@/features/statistics/dashboardData';
 import type { ComparedPeriod } from '@/features/statistics/statistics';
 import { describeInterruption } from '@/features/tracking/permissions';
 import { useDatabaseQuery } from '@/hooks/useDatabaseQuery';
 import { useTheme } from '@/hooks/use-theme';
 import { useTrackingSnapshot } from '@/hooks/useTracking';
-import { formatAccuracy, formatDistance, formatDurationShort, formatKilometers, formatPace } from '@/utils/format';
+import { formatAccuracy, formatDistance, formatDurationShort, formatKilometers, formatPace, formatPercent } from '@/utils/format';
 
 const STICKER_TILTS = [-2, 3, -3, 2];
 const COLLAGE = { width: 168, height: 112 };
@@ -89,7 +90,7 @@ export default function DashboardScreen() {
             <GoalTile data={data} />
             <View style={styles.row}>
               <StreakTile data={data} />
-              <WeekTile week={data.week} todayStart={data.todayStartMs} />
+              <WeekTile week={data.week} todayStart={data.todayStartMs} goal={data.weekGoal} />
             </View>
             <MonthTile data={data} />
             <LifetimeTile data={data} />
@@ -274,7 +275,7 @@ function StreakTile({ data }: { data: DashboardData }) {
   );
 }
 
-function WeekTile({ week, todayStart }: { week: ComparedPeriod; todayStart: number }) {
+function WeekTile({ week, todayStart, goal }: { week: ComparedPeriod; todayStart: number; goal: GoalProgress | null }) {
   const theme = useTheme();
   const busiest = Math.max(1, ...week.days.map((day) => day.totalMeters));
   const change = week.distanceChange;
@@ -289,6 +290,7 @@ function WeekTile({ week, todayStart }: { week: ComparedPeriod; todayStart: numb
           {change !== null ? <DeltaChip change={change} /> : null}
         </View>
         <Value value={formatKilometers(week.current.totalDistanceMeters)} unit="km" />
+        {goal ? <PeriodGoalBar progress={goal} label="Weekly goal" /> : null}
         <View style={styles.bars}>
           {week.days.map((day) => {
             const today = day.startMs === todayStart;
@@ -336,20 +338,44 @@ function DeltaChip({ change }: { change: number }) {
 function MonthTile({ data }: { data: DashboardData }) {
   const count = data.month.activityCount;
   return (
-    <Card style={[styles.tile, styles.monthTile]}>
-      <View style={styles.tileContent}>
-        <TileLabel>THIS MONTH</TileLabel>
-        <Value value={formatKilometers(data.month.totalDistanceMeters)} unit="km" />
+    <Card style={[styles.tile, styles.tileContent]}>
+      <View style={styles.monthTile}>
+        <View style={styles.tileContent}>
+          <TileLabel>THIS MONTH</TileLabel>
+          <Value value={formatKilometers(data.month.totalDistanceMeters)} unit="km" />
+        </View>
+        <View style={styles.monthCount}>
+          <AppText variant="heading" weight="600">
+            {count}
+          </AppText>
+          <AppText variant="caption" color="textSecondary">
+            {count === 1 ? 'activity' : 'activities'}
+          </AppText>
+        </View>
       </View>
-      <View style={styles.monthCount}>
-        <AppText variant="heading" weight="600">
-          {count}
-        </AppText>
-        <AppText variant="caption" color="textSecondary">
-          {count === 1 ? 'activity' : 'activities'}
-        </AppText>
-      </View>
+      {data.monthGoal ? <PeriodGoalBar progress={data.monthGoal} label="Monthly goal" /> : null}
     </Card>
+  );
+}
+
+/** A thin bar for the weekly or monthly goal. */
+function PeriodGoalBar({ progress, label }: { progress: GoalProgress; label: string }) {
+  const theme = useTheme();
+  const color = progress.completed ? theme.success : theme.primary;
+  return (
+    <View
+      style={styles.periodGoal}
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel={`${label}: ${formatDistance(progress.achievedMeters)} of ${trimKm(progress.targetMeters)} km`}
+      accessibilityValue={{ min: 0, max: 100, now: Math.round(progress.fraction * 100) }}>
+      <View style={[styles.periodTrack, { backgroundColor: theme.surfaceAlt }]}>
+        <View style={[styles.periodFill, { width: `${Math.round(progress.fraction * 1000) / 10}%`, backgroundColor: color }]} />
+      </View>
+      <AppText variant="caption" color="textSecondary" numberOfLines={1}>
+        {progress.completed ? `${label} reached` : `${formatPercent(progress.fraction)} of ${trimKm(progress.targetMeters)} km`}
+      </AppText>
+    </View>
   );
 }
 
@@ -357,7 +383,7 @@ function MonthTile({ data }: { data: DashboardData }) {
 function LifetimeTile({ data }: { data: DashboardData }) {
   const theme = useTheme();
   return (
-    <Card>
+    <Card onPress={() => router.push('/routes')} accessibilityLabel="Lifetime totals. Opens the map of all your routes.">
       <View style={styles.collage} pointerEvents="none">
         {data.recent.map((activity) => (
           <View key={activity.id} style={StyleSheet.absoluteFill}>
@@ -373,7 +399,15 @@ function LifetimeTile({ data }: { data: DashboardData }) {
           </View>
         ))}
       </View>
-      <TileLabel>LIFETIME ON DEVICE</TileLabel>
+      <View style={styles.tileHeader}>
+        <TileLabel>LIFETIME ON DEVICE</TileLabel>
+        <View style={styles.inline}>
+          <Icon name="map-outline" size={16} color={theme.textSecondary} />
+          <AppText variant="caption" weight="500" color="textSecondary">
+            All routes
+          </AppText>
+        </View>
+      </View>
       <View style={styles.lifetimeRow}>
         <Value value={formatKilometers(data.records.lifetimeDistanceMeters)} unit="km" />
         <Separator />
@@ -503,6 +537,9 @@ const styles = StyleSheet.create({
   delta: { borderRadius: 6, borderWidth: 1, paddingHorizontal: 6, paddingVertical: 2 },
   deltaText: { fontSize: 11, lineHeight: 14 },
   monthTile: { flexDirection: 'row', alignItems: 'center' },
+  periodGoal: { gap: 4 },
+  periodTrack: { height: 6, borderRadius: Radius.pill, overflow: 'hidden' },
+  periodFill: { height: '100%', borderRadius: Radius.pill },
   monthCount: { marginLeft: 'auto', alignItems: 'flex-end' },
   collage: { position: 'absolute', right: -6, bottom: -14, width: COLLAGE.width, height: COLLAGE.height, opacity: 0.16 },
   lifetimeRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', columnGap: Spacing.md, rowGap: Spacing.xs, marginTop: Spacing.xs },

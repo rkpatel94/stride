@@ -46,13 +46,18 @@ object TrackingNotifications {
     val activityName = if (session.activityType == "run") "Running" else "Walking"
     val activeMs = session.activeMs(nowElapsedMs)
     val distance = formatDistance(session.distanceMeters)
-    val title = when (session.state) {
-      SessionState.PAUSED -> "$activityName · paused"
+    val plan = session.intervals
+    val phase = plan?.phaseAt(activeMs)
+    val title = when {
+      session.state == SessionState.PAUSED -> "$activityName · paused"
+      session.autoPaused -> "$activityName · auto-paused"
+      plan != null && phase != null && phase < plan.repeats * 2 -> "$activityName · round ${phase / 2 + 1} of ${plan.repeats}"
       else -> activityName
     }
+    val ticking = session.state == SessionState.RECORDING && !session.autoPaused
     val text = when {
       !signal.locationEnabled -> "Location is turned off. Distance is not being recorded."
-      session.state == SessionState.PAUSED -> "$distance · ${formatDuration(activeMs)} active"
+      !ticking -> "$distance · ${formatDuration(activeMs)} active"
       signal.signalLost -> "$distance · waiting for GPS signal…"
       signal.lastAccuracyMeters != null -> "$distance · GPS ±${signal.lastAccuracyMeters.roundToInt()} m"
       else -> "$distance · acquiring GPS…"
@@ -71,14 +76,17 @@ object TrackingNotifications {
       .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
       .setContentIntent(openAppIntent(context, session.openUri, REQUEST_OPEN))
 
-    if (session.state == SessionState.RECORDING) {
+    if (ticking) {
       // The system chronometer ticks the active time without us re-posting every second.
       builder.setUsesChronometer(true)
         .setShowWhen(true)
         .setWhen(System.currentTimeMillis() - activeMs)
-      builder.addAction(0, "Pause", serviceIntent(context, TrackingService.ACTION_PAUSE, REQUEST_PAUSE))
     } else {
       builder.setUsesChronometer(false).setShowWhen(false)
+    }
+    if (session.state == SessionState.RECORDING) {
+      builder.addAction(0, "Pause", serviceIntent(context, TrackingService.ACTION_PAUSE, REQUEST_PAUSE))
+    } else {
       builder.addAction(0, "Resume", serviceIntent(context, TrackingService.ACTION_RESUME, REQUEST_RESUME))
     }
     // Finishing opens the app and asks for confirmation, so a pocket tap can't end a workout.

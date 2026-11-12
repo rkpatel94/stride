@@ -58,7 +58,7 @@ function faceFor(role: Role, weight: TextStyle['fontWeight']): string {
     case 'mono':
       return numeric >= 600 ? Fonts.mono[700] : Fonts.mono[500];
     default:
-      return numeric >= 700 ? Fonts.body[700] : numeric >= 600 ? Fonts.body[600] : numeric >= 500 ? Fonts.body[500] : Fonts.body[400];
+      return numeric >= 600 ? Fonts.body[600] : Fonts.body[400];
   }
 }
 
