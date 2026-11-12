@@ -15,10 +15,22 @@ import { Fonts, glow, Radius, Spacing, TouchTarget } from '@/constants/theme';
 import { listAchievements } from '@/database/achievementRepository';
 import { listActivitySummaries } from '@/database/activityRepository';
 import { listGoals } from '@/database/goalRepository';
+import { getPreferences } from '@/database/preferencesRepository';
 import { ACHIEVEMENTS } from '@/features/achievements/achievements';
-import { setDailyGoal, setDailyGoalEnabled } from '@/features/goals/goalService';
-import { dailyGoalCompletions, goalInEffect, goalProgress, validateGoalKilometers } from '@/features/goals/goals';
-import { todaySummary } from '@/features/statistics/statistics';
+import { setGoal, setGoalEnabled } from '@/features/goals/goalService';
+import {
+  GOAL_PERIOD_LABELS,
+  GOAL_PERIODS,
+  goalCompletions,
+  goalForPeriod,
+  goalProgress,
+  periodRange,
+  validateGoalKilometers,
+  type Goal,
+  type GoalPeriod,
+  type GoalProgress,
+} from '@/features/goals/goals';
+import { summarizePeriod } from '@/features/statistics/statistics';
 import { useDatabaseQuery } from '@/hooks/useDatabaseQuery';
 import { useTheme } from '@/hooks/use-theme';
 import { addLocalDays, localDayKey, startOfLocalDay } from '@/utils/dates';
@@ -26,108 +38,85 @@ import { formatDate, formatShortDate } from '@/utils/format';
 
 const HISTORY_DAYS = 28;
 
+type PeriodGoal = {
+  period: GoalPeriod;
+  goal: Goal | null;
+  /** The last target set, shown when the goal is turned back on. */
+  latestTarget: number | null;
+  progress: GoalProgress | null;
+  walkMeters: number;
+  startMs: number;
+  completions: number;
+};
+
+const CAPTIONS: Record<GoalPeriod, (startMs: number) => string> = {
+  daily: () => 'Changes apply from today. Past days keep the goal that was set at the time.',
+  weekly: (startMs) => `Counts for this whole week (from ${formatShortDate(startMs)}). Past weeks keep the goal they had.`,
+  monthly: () => 'Counts for this whole month. Past months keep the goal they had.',
+};
+
+const OFF_TEXT: Record<GoalPeriod, string> = {
+  daily: 'Off. Turn it on to see your progress each day on the Home screen.',
+  weekly: 'Off. Turn it on to aim for a distance each week.',
+  monthly: 'Off. Turn it on to aim for a distance each month.',
+};
+
 export default function GoalsScreen() {
   const theme = useTheme();
   const { data, error, loading } = useDatabaseQuery(async (db) => {
-    const [activities, goals, achievements] = await Promise.all([listActivitySummaries(db), listGoals(db), listAchievements(db)]);
+    const [activities, goals, achievements, preferences] = await Promise.all([
+      listActivitySummaries(db),
+      listGoals(db),
+      listAchievements(db),
+      getPreferences(db),
+    ]);
     const now = Date.now();
-    const today = localDayKey(now);
-    const current = goalInEffect(goals, today);
-    const latestTarget = goals.filter((goal) => goal.periodType === 'daily').pop()?.targetDistanceMeters ?? null;
-    const completions = dailyGoalCompletions(activities, goals);
+    const weekStartsOn = preferences.weekStartsOn;
+    const periods: PeriodGoal[] = GOAL_PERIODS.map((period) => {
+      const range = periodRange(period, now, weekStartsOn);
+      const goal = goalForPeriod(goals, period, now, weekStartsOn);
+      const summary = summarizePeriod(activities, range.startMs, range.endMs);
+      return {
+        period,
+        goal,
+        latestTarget: goals.filter((row) => row.periodType === period).pop()?.targetDistanceMeters ?? null,
+        progress: goal ? goalProgress(goal.targetDistanceMeters, summary.totalDistanceMeters) : null,
+        walkMeters: summary.walkDistanceMeters,
+        startMs: range.startMs,
+        completions: goalCompletions(activities, goals, period, weekStartsOn).length,
+      };
+    });
+    const dailyCompletions = goalCompletions(activities, goals, 'daily', weekStartsOn);
     const todayStart = startOfLocalDay(now);
     return {
-      todayKey: today,
+      todayKey: localDayKey(now),
       days: Array.from({ length: HISTORY_DAYS }, (_, index) => addLocalDays(todayStart, index - HISTORY_DAYS + 1)),
-      current,
-      latestTarget,
-      progress: current ? goalProgress(current.targetDistanceMeters, todaySummary(activities, now).totalDistanceMeters) : null,
-      walkToday: todaySummary(activities, now).walkDistanceMeters,
-      completionDays: new Set(completions.map((completion) => completion.dayKey)),
-      completionCount: completions.length,
+      periods,
+      completionDays: new Set(dailyCompletions.map((completion) => localDayKey(completion.startMs))),
       achievements,
     };
   }, []);
-
-  // null = show the saved goal; a string = what the user is typing.
-  const [draft, setDraft] = useState<string | null>(null);
-  const [inputError, setInputError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const savedTarget = data?.current?.targetDistanceMeters ?? data?.latestTarget ?? null;
-  const input = draft ?? (savedTarget ? String(Number((savedTarget / 1000).toFixed(2))) : '');
-
-  const save = async () => {
-    const result = validateGoalKilometers(input);
-    if ('error' in result) {
-      setInputError(result.error);
-      return;
-    }
-    setInputError(null);
-    setSaving(true);
-    try {
-      await setDailyGoal(result.meters);
-      setDraft(null);
-    } catch (reason) {
-      showError('Could not save the goal', reason);
-    } finally {
-      setSaving(false);
-    }
-  };
 
   if (!data) {
     return <Screen topInset={false}>{loading ? <LoadingState /> : <Banner tone="error" title="Could not load goals" message={error ?? undefined} />}</Screen>;
   }
 
   const unlocked = new Map(data.achievements.map((achievement) => [achievement.type, achievement]));
-  const { days, todayKey } = data;
+  const { days, todayKey, periods } = data;
+  const count = (period: GoalPeriod) => periods.find((entry) => entry.period === period)?.completions ?? 0;
+  const plural = (value: number, unit: string) => `${value} ${unit}${value === 1 ? '' : 's'}`;
 
   return (
     <Screen topInset={false}>
-      <Card>
-        <AppText variant="heading">Daily distance goal</AppText>
-        <View style={styles.switchRow}>
-          <AppText style={styles.flex}>Track a daily goal</AppText>
-          <Switch
-            value={data.current !== null}
-            onValueChange={(enabled) => void setDailyGoalEnabled(enabled).catch((reason: unknown) => showError('Could not update the goal', reason))}
-            accessibilityLabel="Track a daily goal"
-            trackColor={{ true: theme.primary, false: theme.border }}
-            thumbColor={data.current !== null ? theme.onPrimary : theme.textMuted}
-          />
-        </View>
-        {data.current ? (
-          <>
-            <View style={styles.inputRow}>
-              <TextInput
-                value={input}
-                onChangeText={setDraft}
-                keyboardType="decimal-pad"
-                inputMode="decimal"
-                accessibilityLabel="Daily goal in kilometers"
-                style={[styles.input, { color: theme.text, borderColor: inputError ? theme.danger : theme.border, backgroundColor: theme.surfaceAlt }]}
-                maxLength={6}
-                returnKeyType="done"
-                onSubmitEditing={() => void save()}
-              />
-              <AppText variant="heading" color="textSecondary">
-                km
-              </AppText>
-              <Button label="Save" onPress={() => void save()} loading={saving} style={styles.flex} />
-            </View>
-            {inputError ? <AppText tint={theme.danger}>{inputError}</AppText> : null}
-            <AppText variant="caption" color="textMuted">
-              Changes apply from today. Past days keep the goal that was set at the time.
-            </AppText>
-            <GoalProgressBar progress={data.progress} walkMeters={data.walkToday} />
-          </>
-        ) : (
-          <AppText color="textSecondary">Daily goals are off. Turn them on to see daily progress on the Home screen.</AppText>
-        )}
-      </Card>
+      {periods.map((entry) => (
+        <GoalEditor key={entry.period} entry={entry} />
+      ))}
 
       <SectionHeader title="Last four weeks" />
       <Card>
-        <View style={styles.calendar} accessibilityLabel={`Goal reached on ${days.filter((day) => data.completionDays.has(localDayKey(day))).length} of the last ${HISTORY_DAYS} days`}>
+        <View
+          style={styles.calendar}
+          accessibilityLabel={`Daily goal reached on ${days.filter((day) => data.completionDays.has(localDayKey(day))).length} of the last ${HISTORY_DAYS} days`}>
           {days.map((day) => {
             const completed = data.completionDays.has(localDayKey(day));
             return (
@@ -146,7 +135,7 @@ export default function GoalsScreen() {
           })}
         </View>
         <AppText color="textSecondary">
-          Goal reached on {data.completionCount} {data.completionCount === 1 ? 'day' : 'days'} in total.
+          Goals reached in total: {plural(count('daily'), 'day')}, {plural(count('weekly'), 'week')}, {plural(count('monthly'), 'month')}.
         </AppText>
       </Card>
 
@@ -178,12 +167,90 @@ export default function GoalsScreen() {
   );
 }
 
+function GoalEditor({ entry }: { entry: PeriodGoal }) {
+  const theme = useTheme();
+  const { period, goal, latestTarget, progress, walkMeters, startMs } = entry;
+  const labels = GOAL_PERIOD_LABELS[period];
+  // null = show the saved goal; a string = what the user is typing.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [inputError, setInputError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savedTarget = goal?.targetDistanceMeters ?? latestTarget ?? null;
+  const input = draft ?? (savedTarget ? String(Number((savedTarget / 1000).toFixed(2))) : '');
+
+  const save = async () => {
+    const result = validateGoalKilometers(input, period);
+    if ('error' in result) {
+      setInputError(result.error);
+      return;
+    }
+    setInputError(null);
+    setSaving(true);
+    try {
+      await setGoal(period, result.meters);
+      setDraft(null);
+    } catch (reason) {
+      showError('Could not save the goal', reason);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <View style={styles.switchRow}>
+        <AppText variant="heading" style={styles.flex}>
+          {labels.title}
+        </AppText>
+        <Switch
+          value={goal !== null}
+          onValueChange={(enabled) => void setGoalEnabled(period, enabled).catch((reason: unknown) => showError('Could not update the goal', reason))}
+          accessibilityLabel={`Track a ${period} goal`}
+          trackColor={{ true: theme.primary, false: theme.border }}
+          thumbColor={goal !== null ? theme.onPrimary : theme.textMuted}
+        />
+      </View>
+      {goal ? (
+        <>
+          <View style={styles.inputRow}>
+            <TextInput
+              value={input}
+              onChangeText={setDraft}
+              keyboardType="decimal-pad"
+              inputMode="decimal"
+              accessibilityLabel={`${labels.title} in kilometers`}
+              style={[styles.input, { color: theme.text, borderColor: inputError ? theme.danger : theme.border, backgroundColor: theme.surfaceAlt }]}
+              maxLength={7}
+              returnKeyType="done"
+              onSubmitEditing={() => void save()}
+            />
+            <AppText variant="heading" color="textSecondary">
+              km
+            </AppText>
+            <Button label="Save" onPress={() => void save()} loading={saving} style={styles.flex} />
+          </View>
+          {inputError ? <AppText tint={theme.danger}>{inputError}</AppText> : null}
+          <AppText variant="caption" color="textMuted">
+            {CAPTIONS[period](startMs)}
+          </AppText>
+          <AppText variant="label" color="textSecondary">
+            {labels.current.toUpperCase()}
+          </AppText>
+          <GoalProgressBar progress={progress} walkMeters={walkMeters} label={`${labels.title} progress`} />
+        </>
+      ) : (
+        <AppText color="textSecondary">{OFF_TEXT[period]}</AppText>
+      )}
+    </Card>
+  );
+}
+
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   switchRow: { flexDirection: 'row', alignItems: 'center', minHeight: TouchTarget.min },
   inputRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
   input: {
-    width: 110,
+    width: 120,
     minHeight: TouchTarget.min,
     borderWidth: 1.5,
     borderRadius: Radius.md,

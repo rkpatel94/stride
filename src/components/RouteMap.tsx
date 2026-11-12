@@ -20,7 +20,8 @@ import {
 
 import { MAP_FOLLOW_ZOOM, MAP_STYLE_URLS } from '@/constants/map';
 import { Radius, Spacing } from '@/constants/theme';
-import type { RouteGeometry } from '@/features/activities/routeGeometry';
+import { hasBothParts, type RouteGeometry } from '@/features/activities/routeGeometry';
+import type { ActivityType } from '@/features/activities/types';
 import { useTheme } from '@/hooks/use-theme';
 import { boundsOf, circleRing, type LatLng } from '@/utils/geo';
 
@@ -38,6 +39,15 @@ import { RouteThumbnail } from './RouteThumbnail';
 
 export type MapPosition = LatLng & { accuracyMeters?: number | null };
 
+/** One activity on the all-routes map: its preview lines as [lat, lon] pairs. */
+export type OverviewRoute = { id: number; type: ActivityType; lines: [number, number][][] };
+
+export type RouteOverview = {
+  routes: OverviewRoute[];
+  selectedId: number | null;
+  onSelect: (id: number | null) => void;
+};
+
 type RouteMapProps = {
   geometry: RouteGeometry;
   /** Live position (tracking screen). */
@@ -54,6 +64,8 @@ type RouteMapProps = {
   height?: number;
   /** Drawn instead of the map when the map style cannot be loaded. */
   fallbackPreview?: [number, number][][] | null;
+  /** Many routes at once, tappable (the all-routes map). Fitted again whenever the list changes. */
+  overview?: RouteOverview | null;
 };
 
 /** The WebView instance methods used here. */
@@ -67,6 +79,9 @@ const TILE_TIMEOUT_MS = 12_000;
 const MAX_RENDERER_RESTARTS = 2;
 const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] };
 const toLngLat = (point: LatLng): LngLat => [point.longitude, point.latitude];
+const pairToLngLat = ([latitude, longitude]: [number, number]): LngLat => [longitude, latitude];
+/** Room around a fitted route; extra on the right keeps it clear of the map buttons. */
+const FIT_PADDING = { top: 48, right: 72, bottom: 48, left: 48 };
 
 /**
  * Map of the recorded route: MapLibre GL JS in a WebView with free OpenFreeMap tiles (no API key).
@@ -113,6 +128,7 @@ function LiveMap({
   replayTrail,
   routeColor,
   height,
+  overview,
   onStyleFailed,
   onRendererGone,
 }: RouteMapProps & { onStyleFailed: () => void; onRendererGone: () => void }) {
@@ -124,17 +140,40 @@ function LiveMap({
   const centredOnce = useRef(false);
   const color = routeColor ?? theme.route;
   const replaying = Boolean(replayTrail);
-  const allPoints = useMemo(() => geometry.lines.flat(), [geometry]);
+  const overviewRoutes = overview?.routes ?? null;
+  const selectedId = overview?.selectedId ?? null;
+  // Which routes are shown; the camera re-fits when this changes, not on every data refresh.
+  const overviewKey = overviewRoutes?.map((route) => route.id).join(',') ?? '';
+  const allPoints = useMemo(() => {
+    const points = geometry.lines.flat();
+    for (const route of overviewRoutes ?? []) {
+      for (const line of route.lines) for (const [latitude, longitude] of line) points.push({ latitude, longitude });
+    }
+    return points;
+  }, [geometry, overviewRoutes]);
 
   // Only the first render matters for the style, the initial camera and the initial colours.
   const [page] = useState(() => {
     const anchor = currentPosition ?? geometry.start;
+    // A map that shows a whole route opens already fitted to it: no zoom-in from the world view,
+    // so far fewer tiles are requested and then cancelled while the map settles.
+    const box = fitRouteOnReady ? boundsOf(allPoints) : null;
     return buildMapPage({
       styleUrl: theme.scheme === 'dark' ? MAP_STYLE_URLS.dark : MAP_STYLE_URLS.light,
       center: anchor ? toLngLat(anchor) : null,
       zoom: anchor ? MAP_FOLLOW_ZOOM : 1,
+      bounds: box
+        ? {
+            box: [
+              [box.minLongitude, box.minLatitude],
+              [box.maxLongitude, box.maxLatitude],
+            ],
+            padding: FIT_PADDING,
+            maxZoom: MAP_FOLLOW_ZOOM,
+          }
+        : undefined,
       background: theme.surfaceAlt,
-      paint: { color, replay: replaying, gapColor: theme.routeGap, surfaceColor: theme.surface },
+      paint: { color, walkColor: theme.walk, runColor: theme.run, replay: replaying, gapColor: theme.routeGap, surfaceColor: theme.surface },
     });
   });
 
@@ -147,6 +186,7 @@ function LiveMap({
     if (message?.type === 'ready') setReady(true);
     else if (message?.type === 'failed') onStyleFailed();
     else if (message?.type === 'gesture') setFollowing(false);
+    else if (message?.type === 'select') overview?.onSelect(message.id);
   };
 
   useEffect(() => {
@@ -169,8 +209,7 @@ function LiveMap({
         [bounds.minLongitude, bounds.minLatitude],
         [bounds.maxLongitude, bounds.maxLatitude],
       ],
-      // Extra room on the right keeps the route clear of the map buttons.
-      padding: { top: 48, right: 72, bottom: 48, left: 48 },
+      padding: FIT_PADDING,
       duration: 500,
     });
   }, [allPoints, send]);
@@ -190,9 +229,9 @@ function LiveMap({
 
   useEffect(() => {
     if (ready && fitRouteOnReady) fitRoute();
-    // Fit once when the map becomes ready.
+    // Fit once when the map becomes ready, and again when the overview shows other routes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready]);
+  }, [ready, overviewKey]);
 
   useEffect(() => {
     if (!ready || !following || !currentPosition) return;
@@ -210,8 +249,44 @@ function LiveMap({
   const routeShape = useMemo<Feature<MultiLineString> | FeatureCollection>(() => {
     const lines = geometry.lines.filter((line) => line.length > 1);
     if (lines.length === 0) return EMPTY;
-    return { type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines.map((line) => line.map(toLngLat)) } };
+    if (!hasBothParts(geometry)) {
+      return { type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines.map((line) => line.map(toLngLat)) } };
+    }
+    // Walking and running parts in their own colours (the page colours lines by "kind").
+    const byKind = new Map<string, LngLat[][]>();
+    geometry.lines.forEach((line, index) => {
+      if (line.length < 2) return;
+      const kind = geometry.lineTypes[index] ?? 'route';
+      byKind.set(kind, [...(byKind.get(kind) ?? []), line.map(toLngLat)]);
+    });
+    return {
+      type: 'FeatureCollection',
+      features: [...byKind].map(
+        ([kind, coordinates]): Feature<MultiLineString> => ({
+          type: 'Feature',
+          properties: { kind },
+          geometry: { type: 'MultiLineString', coordinates },
+        }),
+      ),
+    };
   }, [geometry]);
+
+  const overviewShape = useMemo<FeatureCollection<MultiLineString>>(
+    () => ({
+      type: 'FeatureCollection',
+      features: (overviewRoutes ?? [])
+        .map((route) => ({ route, lines: route.lines.filter((line) => line.length > 1) }))
+        .filter(({ lines }) => lines.length > 0)
+        .map(
+          ({ route, lines }): Feature<MultiLineString> => ({
+            type: 'Feature',
+            properties: { id: route.id, kind: route.type },
+            geometry: { type: 'MultiLineString', coordinates: lines.map((line) => line.map(pairToLngLat)) },
+          }),
+        ),
+    }),
+    [overviewRoutes],
+  );
 
   const gapShape = useMemo<Feature<MultiLineString> | FeatureCollection>(() => {
     if (geometry.gapConnectors.length === 0) return EMPTY;
@@ -247,8 +322,18 @@ function LiveMap({
 
   // Each part is sent on its own, so a new GPS fix doesn't resend the whole route.
   useEffect(() => {
-    if (ready) send({ type: 'paint', color, replay: replaying, gapColor: theme.routeGap, surfaceColor: theme.surface });
-  }, [ready, color, replaying, theme.routeGap, theme.surface, send]);
+    if (ready) {
+      send({ type: 'paint', color, walkColor: theme.walk, runColor: theme.run, replay: replaying, gapColor: theme.routeGap, surfaceColor: theme.surface });
+    }
+  }, [ready, color, replaying, theme.walk, theme.run, theme.routeGap, theme.surface, send]);
+
+  useEffect(() => {
+    if (ready && overviewRoutes) send({ type: 'shapes', shapes: { overview: overviewShape } });
+  }, [ready, overviewRoutes, overviewShape, send]);
+
+  useEffect(() => {
+    if (ready && overviewRoutes) send({ type: 'select', id: selectedId });
+  }, [ready, overviewRoutes, selectedId, send]);
 
   useEffect(() => {
     if (ready) send({ type: 'shapes', shapes: { route: routeShape, gaps: gapShape } });
@@ -280,7 +365,7 @@ function LiveMap({
         textZoom={100}
         webviewDebuggingEnabled={__DEV__}
         style={[styles.webView, { backgroundColor: theme.surfaceAlt }]}
-        accessibilityLabel="Map of the recorded route"
+        accessibilityLabel={overviewRoutes ? 'Map of all your routes' : 'Map of the recorded route'}
       />
 
       {!ready ? (
@@ -293,7 +378,9 @@ function LiveMap({
         {currentPosition && (!following || !followCurrentPosition) ? (
           <MapButton icon="crosshairs-gps" label="Center on my position" onPress={recenter} />
         ) : null}
-        {allPoints.length > 0 ? <MapButton icon="fit-to-screen-outline" label="Show the whole route" onPress={showWholeRoute} /> : null}
+        {allPoints.length > 0 ? (
+          <MapButton icon="fit-to-screen-outline" label={overviewRoutes ? 'Show all routes' : 'Show the whole route'} onPress={showWholeRoute} />
+        ) : null}
       </View>
     </View>
   );
@@ -312,16 +399,15 @@ function MapButton({ icon, label, onPress }: { icon: 'crosshairs-gps' | 'fit-to-
   );
 }
 
-function MapFallback({ geometry, fallbackPreview, routeColor, height, replayPosition, reason }: RouteMapProps & { reason: string }) {
+function MapFallback({ geometry, fallbackPreview, overview, routeColor, height, replayPosition, reason }: RouteMapProps & { reason: string }) {
   const theme = useTheme();
   const [size, setSize] = useState({ width: 0, height: 0 });
-  const preview = useMemo<[number, number][][]>(
-    () =>
-      geometry.lines.some((line) => line.length > 1)
-        ? geometry.lines.map((line) => line.map((point): [number, number] => [point.latitude, point.longitude]))
-        : (fallbackPreview ?? []),
-    [fallbackPreview, geometry],
-  );
+  const preview = useMemo<[number, number][][]>(() => {
+    if (overview) return overview.routes.flatMap((route) => route.lines);
+    return geometry.lines.some((line) => line.length > 1)
+      ? geometry.lines.map((line) => line.map((point): [number, number] => [point.latitude, point.longitude]))
+      : (fallbackPreview ?? []);
+  }, [fallbackPreview, geometry, overview]);
   const onLayout = (event: LayoutChangeEvent) => {
     const { width, height: measured } = event.nativeEvent.layout;
     setSize({ width, height: measured });

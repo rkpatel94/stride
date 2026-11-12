@@ -1,7 +1,7 @@
 import { StyleSheet, View } from 'react-native';
 
 import { Radius, Spacing, withAlpha } from '@/constants/theme';
-import { ACTIVITY_LABELS, type Activity, type ActivityType } from '@/features/activities/types';
+import { ACTIVITY_LABELS, activityLabel, type Activity, type ActivityType } from '@/features/activities/types';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDate, formatDistance, formatDuration, formatDurationShort, formatPace, formatRelativeDay, formatTime } from '@/utils/format';
 
@@ -19,7 +19,7 @@ type ActivityCardProps = {
 export function ActivityCard({ activity, onPress, onLongPress }: ActivityCardProps) {
   const theme = useTheme();
   const accent = activity.type === 'run' ? theme.run : theme.walk;
-  const label = `${ACTIVITY_LABELS[activity.type]} on ${formatDate(activity.startedAt)} at ${formatTime(activity.startedAt)}, ${formatDistance(activity.distanceMeters)}, ${formatDurationShort(activity.activeDurationSeconds)}`;
+  const label = `${activityLabel(activity)} on ${formatDate(activity.startedAt)} at ${formatTime(activity.startedAt)}, ${formatDistance(activity.distanceMeters)}, ${formatDurationShort(activity.activeDurationSeconds)}`;
   return (
     <Card
       onPress={onPress}
@@ -30,7 +30,7 @@ export function ActivityCard({ activity, onPress, onLongPress }: ActivityCardPro
       <RouteThumbnail lines={activity.routePreview} width={72} height={72} color={accent} strokeWidth={3} glow round />
       <View style={styles.body}>
         <View style={styles.row}>
-          <ActivityChip type={activity.type} />
+          <ActivityChip type={activity.type} label={activityLabel(activity)} />
           <AppText variant="caption" color="textSecondary" numberOfLines={1} style={styles.shrink}>
             {formatRelativeDay(activity.startedAt)} {formatTime(activity.startedAt)}
           </AppText>
@@ -48,14 +48,14 @@ export function ActivityCard({ activity, onPress, onLongPress }: ActivityCardPro
   );
 }
 
-export function ActivityChip({ type }: { type: ActivityType }) {
+export function ActivityChip({ type, label }: { type: ActivityType; label?: string }) {
   const theme = useTheme();
   const color = type === 'run' ? theme.run : theme.walk;
   return (
     <View
       style={[styles.chip, { backgroundColor: type === 'run' ? theme.runSurface : theme.walkSurface, borderColor: withAlpha(color, 0.35) }]}>
       <AppText variant="label" tint={color} style={styles.chipLabel}>
-        {ACTIVITY_LABELS[type]}
+        {label ?? ACTIVITY_LABELS[type]}
       </AppText>
     </View>
   );

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark theme colours for the home-screen widget. -->
+    <color name="stride_widget_background">#14161C</color>
+    <color name="stride_widget_track">#1C1F27</color>
+    <color name="stride_widget_text">#F5F6FA</color>
+    <color name="stride_widget_muted">#A4A9B8</color>
+    <color name="stride_widget_accent">#C6FF3D</color>
+    <color name="stride_widget_primary">#C6FF3D</color>
+    <color name="stride_widget_on_accent">#0A0B0F</color>
+    <color name="stride_widget_walk">#46C8FF</color>
+    <color name="stride_widget_walk_surface">#112433</color>
+    <color name="stride_widget_run">#FF6B3D</color>
+    <color name="stride_widget_run_surface">#2E1710</color>
+</resources>

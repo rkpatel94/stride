@@ -19,7 +19,8 @@ import { definitionFor } from '@/features/achievements/achievements';
 import { changeActivityType, deleteCompletedActivity } from '@/features/activities/activityService';
 import { buildReplayTimeline, frameAt, REPLAY_SPEEDS, type ReplaySpeed } from '@/features/activities/replay';
 import { buildRouteGeometry } from '@/features/activities/routeGeometry';
-import { ACTIVITY_LABELS } from '@/features/activities/types';
+import { ACTIVITY_LABELS, activityLabel, isMixed, type Activity } from '@/features/activities/types';
+import { GOAL_PERIOD_LABELS, type GoalPeriod } from '@/features/goals/goals';
 import { trackingEngine } from '@/features/tracking/engineInstance';
 import { REJECTION_LABELS } from '@/features/tracking/gpsQuality';
 import type { RejectionReason } from '@/features/tracking/gpsFilter';
@@ -36,6 +37,7 @@ import {
   formatSpeed,
   formatTime,
 } from '@/utils/format';
+import { averagePaceSecondsPerKm } from '@/utils/pace';
 
 const REPLAY_TICK_MS = 100;
 
@@ -132,9 +134,12 @@ export default function ActivityDetailScreen() {
   const switchType = useCallback(async () => {
     if (!data) return;
     const next = data.activity.type === 'run' ? 'walk' : 'run';
+    const mixed = isMixed(data.activity);
     const ok = await confirm({
-      title: `Change to ${ACTIVITY_LABELS[next].toLowerCase()}?`,
-      message: 'Only the activity type changes; the route and distance stay the same.',
+      title: mixed ? `Make it all a ${ACTIVITY_LABELS[next].toLowerCase()}?` : `Change to ${ACTIVITY_LABELS[next].toLowerCase()}?`,
+      message: mixed
+        ? `The walking and running parts are merged into one ${ACTIVITY_LABELS[next].toLowerCase()}. The route and distance stay the same.`
+        : 'Only the activity type changes; the route and distance stay the same.',
       confirmLabel: 'Change',
     });
     if (!ok) return;
@@ -159,7 +164,7 @@ export default function ActivityDetailScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ title: `${ACTIVITY_LABELS[activity.type]} · ${formatDate(activity.startedAt)}` }} />
+      <Stack.Screen options={{ title: `${activityLabel(activity)} · ${formatDate(activity.startedAt)}` }} />
       <Screen topInset={false}>
         {justCompleted ? <CompletionCard info={justCompleted} distanceMeters={activity.distanceMeters} onDismiss={() => trackingEngine.clearLastCompleted()} /> : null}
         {inProgress ? <Banner tone="info" title="This workout is still in progress" message="Open the Track tab to continue or finish it." /> : null}
@@ -216,7 +221,7 @@ export default function ActivityDetailScreen() {
           <View style={styles.titleRow}>
             <Icon name={ACTIVITY_ICONS[activity.type]} size={22} color={accent} />
             <AppText variant="heading" tint={accent}>
-              {ACTIVITY_LABELS[activity.type]}
+              {activityLabel(activity)}
             </AppText>
             <Pressable onPress={() => void switchType()} accessibilityRole="button" hitSlop={8} style={styles.changeType}>
               <AppText variant="label" tint={theme.accent}>
@@ -243,6 +248,8 @@ export default function ActivityDetailScreen() {
             />
           </View>
         </Card>
+
+        {isMixed(activity) ? <PartsCard activity={activity} /> : null}
 
         <SectionHeader title="GPS quality" />
         <Card>
@@ -289,22 +296,72 @@ export default function ActivityDetailScreen() {
   );
 }
 
+/** Distance, active time and pace of the walking and the running part. */
+function PartsCard({ activity }: { activity: Activity }) {
+  const theme = useTheme();
+  const total = Math.max(1, activity.walkDistanceMeters + activity.runDistanceMeters);
+  const parts = [
+    { type: 'walk' as const, meters: activity.walkDistanceMeters, seconds: activity.walkActiveSeconds, color: theme.walk },
+    { type: 'run' as const, meters: activity.runDistanceMeters, seconds: activity.runActiveSeconds, color: theme.run },
+  ];
+  return (
+    <>
+      <SectionHeader title="Walking and running" />
+      <Card>
+        <View style={[styles.partsBar, { backgroundColor: theme.surfaceAlt }]} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+          {parts.map((part) => (
+            <View key={part.type} style={{ flex: part.meters / total, backgroundColor: part.color }} />
+          ))}
+        </View>
+        {parts.map((part) => (
+          <View key={part.type} style={styles.part}>
+            <View style={styles.titleRow}>
+              <Icon name={ACTIVITY_ICONS[part.type]} size={20} color={part.color} />
+              <AppText weight="700" style={styles.flex}>
+                {part.type === 'run' ? 'Running' : 'Walking'}
+              </AppText>
+              <AppText variant="heading" tint={part.color}>
+                {formatDistance(part.meters, { alwaysKm: true })}
+              </AppText>
+            </View>
+            <View style={styles.grid}>
+              <Metric label="Active time" value={formatDuration(part.seconds)} style={styles.cell} />
+              <Metric label="Avg pace" value={formatPace(averagePaceSecondsPerKm(part.seconds, part.meters))} unit="/km" style={styles.cell} />
+            </View>
+          </View>
+        ))}
+        <AppText variant="caption" color="textMuted">
+          On the map, walking is drawn in blue and running in orange.
+        </AppText>
+      </Card>
+    </>
+  );
+}
+
+function goalsMessage(periods: GoalPeriod[]): string {
+  const names = periods.map((period) => GOAL_PERIOD_LABELS[period].title.split(' ')[0].toLowerCase());
+  if (names.length === 1) return `${GOAL_PERIOD_LABELS[periods[0]].title} reached — nice work!`;
+  const list = `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  return `${list.charAt(0).toUpperCase()}${list.slice(1)} goals reached — nice work!`;
+}
+
 function CompletionCard({
   info,
   distanceMeters,
   onDismiss,
 }: {
-  info: { unlockedAchievements: string[]; goalReached: boolean };
+  info: { unlockedAchievements: string[]; goalsReached: GoalPeriod[] };
   distanceMeters: number;
   onDismiss: () => void;
 }) {
   const theme = useTheme();
+  const reached = info.goalsReached.length > 0;
   return (
     <View style={[styles.completion, { backgroundColor: theme.successSurface, borderColor: theme.success }]} accessibilityLiveRegion="polite">
       <View style={styles.titleRow}>
-        <Icon name={info.goalReached ? 'party-popper' : 'check-circle'} size={26} color={theme.success} />
+        <Icon name={reached ? 'party-popper' : 'check-circle'} size={26} color={theme.success} />
         <AppText variant="heading" style={styles.flex}>
-          {info.goalReached ? 'Daily goal reached — nice work!' : `Saved · ${formatDistance(distanceMeters)}`}
+          {reached ? goalsMessage(info.goalsReached) : `Saved · ${formatDistance(distanceMeters)}`}
         </AppText>
         <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel="Dismiss" hitSlop={12}>
           <Icon name="close" size={22} color={theme.textSecondary} />
@@ -358,4 +415,6 @@ const styles = StyleSheet.create({
   progressTrack: { height: 8, borderRadius: Radius.pill, overflow: 'hidden' },
   progressFill: { height: '100%' },
   qualityRow: { flexDirection: 'row', justifyContent: 'space-between', minHeight: 28, alignItems: 'center' },
+  partsBar: { flexDirection: 'row', height: 10, borderRadius: Radius.pill, overflow: 'hidden', gap: 2 },
+  part: { gap: Spacing.sm },
 });

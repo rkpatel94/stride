@@ -3,6 +3,7 @@ import { countGoals, upsertGoal } from '@/database/goalRepository';
 import { serializeWrite } from '@/database/writeQueue';
 import { DEFAULT_DAILY_GOAL_METERS } from '@/features/goals/goals';
 import { trackingEngine } from '@/features/tracking/engineInstance';
+import { startWidgetSync } from '@/features/widget/widgetSync';
 import { localDayKey } from '@/utils/dates';
 
 /**
@@ -27,4 +28,5 @@ export async function bootstrapApp(): Promise<void> {
     // The app stays usable (history, statistics); the engine surfaces the error on its snapshot.
     console.warn('Tracking engine failed to initialise', error);
   }
+  startWidgetSync();
 }

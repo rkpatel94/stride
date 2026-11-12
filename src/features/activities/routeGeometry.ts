@@ -1,14 +1,20 @@
 import { haversineDistanceMeters, type LatLng } from '@/utils/geo';
 
+import type { ActivityType } from './types';
+
 /** The parts of a stored or live point needed to draw the route. */
 export type RouteVertex = LatLng & {
   startsNewLine: boolean;
   gapBeforeSeconds: number | null;
+  /** The walk/run part; a change starts a new line that continues from the previous point. */
+  activityType?: ActivityType | null;
 };
 
 export type RouteGeometry = {
   /** Solid polylines made of consecutive accepted fixes. */
   lines: LatLng[][];
+  /** The part each line was recorded in (same length as lines); null when unknown. */
+  lineTypes: (ActivityType | null)[];
   /**
    * Short GPS gaps whose straight-line distance was counted: drawn dashed so it is visible that
    * no fixes exist between the two ends.
@@ -19,7 +25,7 @@ export type RouteGeometry = {
 };
 
 export function emptyGeometry(): RouteGeometry {
-  return { lines: [], gapConnectors: [], start: null, end: null };
+  return { lines: [], lineTypes: [], gapConnectors: [], start: null, end: null };
 }
 
 /**
@@ -28,38 +34,68 @@ export function emptyGeometry(): RouteGeometry {
  */
 export function appendVertex(geometry: RouteGeometry, vertex: RouteVertex): RouteGeometry {
   const point: LatLng = { latitude: vertex.latitude, longitude: vertex.longitude };
+  const type = vertex.activityType ?? null;
   const lines = geometry.lines.slice();
+  const lineTypes = geometry.lineTypes.slice();
   let gapConnectors = geometry.gapConnectors;
-  const lastLine = lines[lines.length - 1];
+  const last = lines.length - 1;
+  const lastLine = lines[last];
+  const lastType = lineTypes[last] ?? null;
 
   if (!lastLine || vertex.startsNewLine) {
     lines.push([point]);
+    lineTypes.push(type);
   } else if (vertex.gapBeforeSeconds !== null) {
     gapConnectors = [...gapConnectors, [lastLine[lastLine.length - 1], point]];
     lines.push([point]);
+    lineTypes.push(type);
+  } else if (switchesPart(lastType, type)) {
+    lines.push([lastLine[lastLine.length - 1], point]);
+    lineTypes.push(type);
   } else {
-    lines[lines.length - 1] = [...lastLine, point];
+    lines[last] = [...lastLine, point];
+    lineTypes[last] = lastType ?? type;
   }
-  return { lines, gapConnectors, start: geometry.start ?? point, end: point };
+  return { lines, lineTypes, gapConnectors, start: geometry.start ?? point, end: point };
 }
 
 export function buildRouteGeometry(vertices: RouteVertex[]): RouteGeometry {
   const lines: LatLng[][] = [];
+  const lineTypes: (ActivityType | null)[] = [];
   const gapConnectors: [LatLng, LatLng][] = [];
   for (const vertex of vertices) {
     const point: LatLng = { latitude: vertex.latitude, longitude: vertex.longitude };
-    const lastLine = lines[lines.length - 1];
+    const type = vertex.activityType ?? null;
+    const last = lines.length - 1;
+    const lastLine = lines[last];
+    const lastType = lineTypes[last] ?? null;
     if (!lastLine || vertex.startsNewLine) {
       lines.push([point]);
+      lineTypes.push(type);
     } else if (vertex.gapBeforeSeconds !== null) {
       gapConnectors.push([lastLine[lastLine.length - 1], point]);
       lines.push([point]);
+      lineTypes.push(type);
+    } else if (switchesPart(lastType, type)) {
+      lines.push([lastLine[lastLine.length - 1], point]);
+      lineTypes.push(type);
     } else {
       lastLine.push(point);
+      lineTypes[last] = lastType ?? type;
     }
   }
   const flat = lines.flat();
-  return { lines, gapConnectors, start: flat[0] ?? null, end: flat[flat.length - 1] ?? null };
+  return { lines, lineTypes, gapConnectors, start: flat[0] ?? null, end: flat[flat.length - 1] ?? null };
+}
+
+/** A known part followed by the other one (points without a part never split a line). */
+function switchesPart(previous: ActivityType | null, next: ActivityType | null): boolean {
+  return previous !== null && next !== null && previous !== next;
+}
+
+/** True when the route has both walking and running lines. */
+export function hasBothParts(geometry: RouteGeometry): boolean {
+  return geometry.lineTypes.includes('walk') && geometry.lineTypes.includes('run');
 }
 
 /**

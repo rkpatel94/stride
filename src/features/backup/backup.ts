@@ -11,7 +11,8 @@ import { isValidCoordinate } from '@/utils/geo';
  * (the app never uploads it). Route points are stored column-wise to keep files compact.
  */
 export const BACKUP_FORMAT = 'stride-backup';
-export const BACKUP_VERSION = 1;
+/** Version 2 adds walk/run parts (per-type totals, a type per point); version 1 files still import. */
+export const BACKUP_VERSION = 2;
 
 const POINT_COLUMNS = [
   'sequenceNumber',
@@ -29,7 +30,9 @@ const POINT_COLUMNS = [
   'rejectionReason',
   'startsNewLine',
   'gapBeforeSeconds',
+  'activityType',
 ] as const;
+const POINT_COLUMNS_V1 = POINT_COLUMNS.slice(0, 15);
 
 type PointRow = (string | number | null)[];
 
@@ -40,6 +43,10 @@ type BackupActivity = {
   elapsedDurationSeconds: number | null;
   activeDurationSeconds: number | null;
   distanceMeters: number;
+  walkDistanceMeters: number;
+  runDistanceMeters: number;
+  walkActiveSeconds: number;
+  runActiveSeconds: number;
   averagePaceSecondsPerKm: number | null;
   averageSpeedMps: number | null;
   gpsQualitySummary: string | null;
@@ -74,6 +81,10 @@ type ActivityRow = {
   elapsed_duration_seconds: number | null;
   active_duration_seconds: number | null;
   distance_meters: number;
+  walk_distance_meters: number;
+  run_distance_meters: number;
+  walk_active_seconds: number;
+  run_active_seconds: number;
   average_pace_seconds_per_km: number | null;
   average_speed_mps: number | null;
   gps_quality_summary: string | null;
@@ -96,6 +107,10 @@ export async function createBackup(db: SqlDatabase, now = Date.now()): Promise<B
       elapsedDurationSeconds: row.elapsed_duration_seconds,
       activeDurationSeconds: row.active_duration_seconds,
       distanceMeters: row.distance_meters,
+      walkDistanceMeters: row.walk_distance_meters,
+      runDistanceMeters: row.run_distance_meters,
+      walkActiveSeconds: row.walk_active_seconds,
+      runActiveSeconds: row.run_active_seconds,
       averagePaceSecondsPerKm: row.average_pace_seconds_per_km,
       averageSpeedMps: row.average_speed_mps,
       gpsQualitySummary: row.gps_quality_summary,
@@ -121,6 +136,7 @@ export async function createBackup(db: SqlDatabase, now = Date.now()): Promise<B
           point.rejectionReason,
           point.startsNewLine ? 1 : 0,
           point.gapBeforeSeconds,
+          point.activityType,
         ]),
       },
     });
@@ -145,10 +161,11 @@ export function parseBackup(input: unknown): Backup {
   if (!input || typeof input !== 'object') throw new BackupError('This file is not a Stride backup.');
   const data = input as Record<string, unknown>;
   if (data.format !== BACKUP_FORMAT) throw new BackupError('This file is not a Stride backup.');
-  if (data.version !== BACKUP_VERSION) {
+  if (data.version !== 1 && data.version !== BACKUP_VERSION) {
     throw new BackupError(`Unsupported backup version ${String(data.version)}. Update the app and try again.`);
   }
   if (!Array.isArray(data.activities) || !Array.isArray(data.goals)) throw new BackupError('The backup file is incomplete.');
+  const layout: readonly string[] = data.version === 1 ? POINT_COLUMNS_V1 : POINT_COLUMNS;
 
   const activities = data.activities.map((raw, index): BackupActivity => {
     const activity = raw as Record<string, unknown>;
@@ -160,19 +177,26 @@ export function parseBackup(input: unknown): Backup {
     if (!points || !Array.isArray(points.columns) || !Array.isArray(points.rows)) {
       throw new BackupError(`Activity ${index + 1} has no route data.`);
     }
-    if (points.columns.join(',') !== POINT_COLUMNS.join(',')) throw new BackupError('Route data uses an unknown layout.');
+    if (points.columns.join(',') !== layout.join(',')) throw new BackupError('Route data uses an unknown layout.');
     for (const row of points.rows) {
-      if (!Array.isArray(row) || row.length !== POINT_COLUMNS.length || !isValidCoordinate({ latitude: row[2], longitude: row[3] })) {
+      if (!Array.isArray(row) || row.length !== layout.length || !isValidCoordinate({ latitude: row[2], longitude: row[3] })) {
         throw new BackupError(`Activity ${index + 1} contains an invalid route point.`);
       }
     }
+    // Version 1 has no parts: the whole workout is its type.
+    const active = finiteOrNull(activity.activeDurationSeconds);
+    const isWalk = activity.type === 'walk';
     return {
       type: activity.type,
       startedAt: activity.startedAt,
       endedAt: finiteOrNull(activity.endedAt),
       elapsedDurationSeconds: finiteOrNull(activity.elapsedDurationSeconds),
-      activeDurationSeconds: finiteOrNull(activity.activeDurationSeconds),
+      activeDurationSeconds: active,
       distanceMeters: activity.distanceMeters,
+      walkDistanceMeters: finiteOrNull(activity.walkDistanceMeters) ?? (isWalk ? activity.distanceMeters : 0),
+      runDistanceMeters: finiteOrNull(activity.runDistanceMeters) ?? (isWalk ? 0 : activity.distanceMeters),
+      walkActiveSeconds: finiteOrNull(activity.walkActiveSeconds) ?? (isWalk ? (active ?? 0) : 0),
+      runActiveSeconds: finiteOrNull(activity.runActiveSeconds) ?? (isWalk ? 0 : (active ?? 0)),
       averagePaceSecondsPerKm: finiteOrNull(activity.averagePaceSecondsPerKm),
       averageSpeedMps: finiteOrNull(activity.averageSpeedMps),
       gpsQualitySummary: stringOrNull(activity.gpsQualitySummary),
@@ -180,7 +204,7 @@ export function parseBackup(input: unknown): Backup {
       notes: stringOrNull(activity.notes),
       createdAt: finiteOrNull(activity.createdAt) ?? activity.startedAt,
       updatedAt: finiteOrNull(activity.updatedAt) ?? activity.startedAt,
-      points: { columns: POINT_COLUMNS, rows: points.rows as PointRow[] },
+      points: { columns: layout, rows: points.rows as PointRow[] },
     };
   });
 
@@ -211,25 +235,24 @@ export function parseBackup(input: unknown): Backup {
 export type ImportResult = { imported: number; skipped: number; goals: number };
 
 /**
- * Merges a backup into the database. Activities already present (same type and start time) are
- * skipped, so importing the same file twice changes nothing. Call inside a write transaction.
+ * Merges a backup into the database. Activities already present (same start time; the type can
+ * change after recording) are skipped, so importing the same file twice changes nothing. Call
+ * inside a write transaction.
  */
 export async function importBackup(db: SqlDatabase, backup: Backup): Promise<ImportResult> {
   let imported = 0;
   let skipped = 0;
   for (const activity of backup.activities) {
-    const existing = await db.getFirstAsync<{ id: number }>('SELECT id FROM activities WHERE started_at = ? AND type = ?', [
-      activity.startedAt,
-      activity.type,
-    ]);
+    const existing = await db.getFirstAsync<{ id: number }>('SELECT id FROM activities WHERE started_at = ?', [activity.startedAt]);
     if (existing) {
       skipped += 1;
       continue;
     }
     const result = await db.runAsync(
       `INSERT INTO activities (type, status, started_at, ended_at, elapsed_duration_seconds, active_duration_seconds, distance_meters,
+         walk_distance_meters, run_distance_meters, walk_active_seconds, run_active_seconds,
          average_pace_seconds_per_km, average_speed_mps, gps_quality_summary, route_preview, notes, created_at, updated_at)
-       VALUES (?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         activity.type,
         activity.startedAt,
@@ -237,6 +260,10 @@ export async function importBackup(db: SqlDatabase, backup: Backup): Promise<Imp
         activity.elapsedDurationSeconds,
         activity.activeDurationSeconds,
         activity.distanceMeters,
+        activity.walkDistanceMeters,
+        activity.runDistanceMeters,
+        activity.walkActiveSeconds,
+        activity.runActiveSeconds,
         activity.averagePaceSecondsPerKm,
         activity.averageSpeedMps,
         activity.gpsQualitySummary,
@@ -264,6 +291,7 @@ export async function importBackup(db: SqlDatabase, backup: Backup): Promise<Imp
       rejectionReason: stringOrNull(row[12]),
       startsNewLine: row[13] === 1,
       gapBeforeSeconds: finiteOrNull(row[14]),
+      activityType: row[15] === 'walk' || row[15] === 'run' ? row[15] : null,
     }));
     await insertRoutePoints(db, points);
     imported += 1;

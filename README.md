@@ -1,9 +1,11 @@
 # Stride — personal walking & running tracker (Android)
 
 Stride records outdoor walks and runs with GPS, measures distance from the recorded fixes, shows
-the route on a free OpenStreetMap-based map, and keeps history, statistics, a daily goal and
-achievements — all stored on the phone. No account, server, cloud database, analytics,
-subscription or API key.
+the route on a free OpenStreetMap-based map, and keeps history, statistics, daily, weekly and
+monthly goals and achievements — all stored on the phone. A workout can switch between walking
+and running, pause itself while you stand still, and guide run/walk intervals with voice and
+vibration cues; a map shows all your routes and a home-screen widget shows today's distance. No
+account, server, cloud database, analytics, subscription or API key.
 
 - **Platform:** Android (minSdk 24, targetSdk 36), React Native 0.88 / Expo SDK 58, TypeScript.
 - **Recording:** a Kotlin foreground service (type `location`) using the Fused Location Provider
@@ -20,17 +22,18 @@ subscription or API key.
 1. [Verification status](#verification-status)
 2. [Quick start](#quick-start)
 3. [Maps](#maps)
-4. [Run on a phone](#run-on-a-physical-phone)
-5. [Release build](#release-build-signed-apk--aab)
-6. [Architecture](#architecture)
-7. [GPS processing and distance](#gps-processing-and-distance)
-8. [Data model](#data-model)
-9. [Statistics, goals and achievements](#statistics-goals-and-achievements)
-10. [Privacy and data](#privacy-and-data)
-11. [Testing](#testing)
-12. [Troubleshooting](#troubleshooting)
-13. [Project structure](#project-structure)
-14. [Known limitations](#known-limitations)
+4. [Workout features](#workout-features)
+5. [Run on a phone](#run-on-a-physical-phone)
+6. [Release build](#release-build-signed-apk--aab)
+7. [Architecture](#architecture)
+8. [GPS processing and distance](#gps-processing-and-distance)
+9. [Data model](#data-model)
+10. [Statistics, goals and achievements](#statistics-goals-and-achievements)
+11. [Privacy and data](#privacy-and-data)
+12. [Testing](#testing)
+13. [Troubleshooting](#troubleshooting)
+14. [Project structure](#project-structure)
+15. [Known limitations](#known-limitations)
 
 ## Verification status
 
@@ -43,11 +46,12 @@ What has been verified, and how — nothing below is claimed beyond what was act
 | Start/pause/resume/finish, journal→SQLite exactly-once, JS restart, killed process, crash between commit and ack, orphaned sessions, discard | Integration tests: real SQLite (Node's built-in engine) + a fake native module with the service's semantics (`tests/integration`) |
 | Migrations, constraints, cascade delete, achievement idempotency, backup round-trip | Integration tests |
 | Native module compiles; debug APK builds | `./gradlew assembleDebug` on Windows (JDK 17, AGP 9.2, Gradle 9.4) |
-| Release (R8-minified) APK | `./gradlew assembleRelease` → **11.3 MB**, arm64-v8a only (79.4 MB before the size work: arm64-v8a + x86_64, MapLibre Native) — see [App size](#app-size). Builds and compiles; **not yet run on a device** (it adds the built-in SQLite module, font subsets and the Fresco exclusion). An earlier 13.1 MB build for x86_64 started on the Android 17 emulator without errors and the dashboard rendered with the SVG icons and trimmed fonts; the map, chart and a recorded walk were not re-checked on it. Earlier release builds (MapLibre Native) were checked on the emulator: installed over the debug build with data preserved, a walk recorded and finished with the live map, detail-screen map and replay, and one walk with **airplane mode on** |
+| Release (R8-minified) APK | `./gradlew assembleRelease` → **11.3 MB** (11,339,961 bytes), arm64-v8a only (79.4 MB before the size work: arm64-v8a + x86_64, MapLibre Native) — see [App size](#app-size). The same code built for x86_64 (11.6 MB) ran on the Android 17 emulator — see [workout features on the emulator](#workout-features-on-the-emulator). The arm64 build itself has not been installed on a phone. Earlier release builds (MapLibre Native) were checked on the emulator: installed over the debug build with data preserved, a walk recorded and finished with the live map, detail-screen map and replay, and one walk with **airplane mode on** |
 | End-to-end on Android 17 (API 37) **emulator** | Permission flow, first-fix acquisition, foreground service (`type=location`), live notification, recording with the display off, pause/resume and finish — see [emulator results](#emulator-smoke-test-results) |
 | Maps on the **emulator** — with MapLibre Native, before the WebView map | OpenFreeMap tiles load in the Liberty (light) and Dark styles; live route line, start/finish and position markers, accuracy circle; following, panning stops following, recenter, show whole route; detail screen fits the route; replay trail and marker. With no DNS in the emulator the style failed to load and the offline route sketch was shown instead |
-| WebView map (MapLibre GL JS) | Unit tests of the page builder and its message protocol (`tests/unit/mapPage.test.ts`); type-checked against react-native-webview. **Not yet run on an emulator or phone** — repeat the map checks above |
-| **Not yet verified** | The WebView map and the SVG bar chart on a device; the built-in SQLite module on a device (including opening a database written by an earlier expo-sqlite build); the app without Fresco's JPEG transcoder and filter libraries; a physical phone; distance accuracy outdoors; long screen-locked sessions on real hardware; OEM battery killers; map tile caching while offline after a first online view; a signed release build installed on a device; the minSdk 24 device. Use [`docs/FIELD_TESTING.md`](docs/FIELD_TESTING.md). |
+| WebView map (MapLibre GL JS) | Unit tests of the page builder and its message protocol (`tests/unit/mapPage.test.ts`). On the Android 17 emulator (x86_64 release build): tiles, the live map following a simulated walk, walk/run colours, the detail map and the all-routes map with tap-to-select. Once, opening the all-routes map while two other maps were open crashed the app inside the WebView itself (`libwebviewchromium.so`, its network thread); maps that show a whole route now open already fitted instead of zooming in from the world view, and 6 further attempts with three maps open did not crash |
+| Walk/run parts, auto-pause, intervals, goals, routes map, widget | Unit and integration tests (above), and on the emulator — see [workout features on the emulator](#workout-features-on-the-emulator). Voice cues: the text-to-speech engine bound and no errors were logged; the emulator has no audio check here, so hearing them is **not verified** |
+| **Not yet verified** | The WebView map and the SVG bar chart on a phone; spoken interval cues being audible; the widget on launchers other than the emulator's Pixel launcher; the built-in SQLite module on a device (including opening a database written by an earlier expo-sqlite build); the app without Fresco's JPEG transcoder and filter libraries; a physical phone; distance accuracy outdoors; long screen-locked sessions on real hardware; OEM battery killers; map tile caching while offline after a first online view; a signed release build installed on a device; the minSdk 24 device. Use [`docs/FIELD_TESTING.md`](docs/FIELD_TESTING.md). |
 
 ### Emulator smoke test results
 
@@ -76,6 +80,37 @@ Debug build on the `Google APIs` x86_64 image (Android 17 / API 37), walking sim
 
 These runs exercise the plumbing only. Emulator fixes have no noise, so they say nothing about
 real-world distance accuracy.
+
+### Workout features on the emulator
+
+x86_64 release build on the same Android 17 emulator (fresh install), positions fed with
+`adb emu geo fix` once a second:
+
+- Goals screen: weekly goal turned on ("counts for this whole week, from Nov 9"), set to 0.5 km;
+  monthly goal on at 100 km. Dashboard then showed the weekly and monthly bars.
+- Track screen: auto-pause and a 0:15 run / 0:15 walk × 2 interval plan; "Start intervals"
+  started with a run. The interval card counted down ("RUN · ROUND 1 OF 2 … then walk"), the
+  service switched the part to walking at 15 s (switch, notification "Walking · round 1 of 2"),
+  and "INTERVALS DONE" after 60 s of active time. The text-to-speech engine bound
+  (`Sucessfully bound to com.google.android.tts`) and no cue errors were logged.
+- The map drew running parts orange and walking parts blue; the panel showed "Walked … · Ran …"
+  with each part's active time.
+- Standing still (speed 0) for 25 s: "AUTO-PAUSED" pill and banner, notification
+  "Running · auto-paused · 2:46 active"; moving again ended it by itself. Active time stayed
+  behind elapsed time by the standing time.
+- Switching to *Running* by hand during the walk part: notification "Running", new fixes orange.
+- Widget added from the launcher's widget list: during the workout "Running · 0.57 km" with
+  *Open workout* (which opened the tracker); after saving "0.57 km · 11% of 5.00 km daily goal"
+  with *Walk* / *Run*.
+- Finished through the notification's deep link (`stride://track?confirmFinish=1`): saved as
+  "Walk + run", completion card "Weekly goal reached — nice work!" with the *Weekly goal reached*
+  achievement, the *Walking and running* card (0.17 km walked, 0.40 km run), the History/Home card
+  labelled "Walk + run", and the route in two colours.
+- All routes (from the Home lifetime tile): the route, the type and time filters, and tapping
+  the route highlighted it and showed its workout.
+- Caveat: when the simulated walk stopped, the emulator kept repeating its last fix with the
+  old speed, so auto-pause could not trigger and that idle time counted as running. A phone at
+  rest reports a speed near 0.
 
 ## Quick start
 
@@ -126,7 +161,41 @@ server) can be swapped in.
   keeps what it has shown. If the map style cannot load, the app shows an offline sketch of the
   route instead. Recording never depends on the map.
 - The route, gaps (dashed), start/finish, current position with its accuracy circle and the replay
-  marker are drawn as map layers from the recorded fixes; nothing is snapped to roads.
+  marker are drawn as map layers from the recorded fixes; nothing is snapped to roads. A workout
+  with walking and running parts is drawn in two colours (walk blue, run orange).
+
+## Workout features
+
+- **Walking and running in one workout.** While recording, the *Walking / Running* switch on the
+  Track screen starts a new part. Every fix stores the part it was recorded in
+  (`route_points.activity_type`); distance counts for the part of the fix that completed it, and
+  active time for the part that was current. A saved workout keeps both parts
+  (`walk_distance_meters`, `run_distance_meters`, `walk_active_seconds`, `run_active_seconds`)
+  and its main type is the part with the larger distance; it is shown as "Walk + run" once both
+  parts are at least 50 m. Statistics, goals and the walk/run split count each part's distance
+  separately. *Change type* on a saved workout merges the parts into one type.
+- **Auto-pause** (Settings, or the Track screen before and during a workout). The service stops
+  the active clock after 8 s below 0.35 m/s (dated from when the phone stopped) and restarts it
+  after two fixes at 0.7 m/s or more (dated from the first). Location keeps recording, so the
+  route and distance continue; only active time, pace and intervals wait. Needs the provider's
+  speed (GPS); without it nothing is paused.
+- **Run/walk intervals** (Track screen): run for a set time, walk for a set time, a number of
+  rounds (15 s to 30 min per phase, 1–30 rounds; default 1:00 run, 2:00 walk, 8 rounds). The
+  workout starts with a run; the service switches the walking/running part at each phase,
+  speaks the next phase with Android's text-to-speech (other audio is lowered meanwhile) and
+  vibrates (two buzzes for run, one long for walk, three short when done). Phases are timed on
+  the active clock, so pauses and auto-pause hold them. Switching by hand overrides the current
+  phase until the next one. Home's and the widget's start buttons start a plain walk or run;
+  intervals start from the Track screen.
+- **All your routes** (Statistics → *Map of all your routes*, or the Home lifetime tile): every
+  saved route on one map from the compact previews stored with each workout, coloured by main
+  type, filterable by type and time range; tap a route to see its workout.
+- **Home-screen widget** (4×2, resizable): today's distance with the daily-goal bar, *Walk* and
+  *Run* buttons that open the tracker and start, and the workout in progress (distance, paused or
+  auto-paused). The app refreshes it after every change; during a workout the service refreshes
+  it at most every 15 s.
+- **Weekly and monthly goals** next to the daily goal (Goals & achievements): see
+  [Statistics, goals and achievements](#statistics-goals-and-achievements).
 
 ## Run on a physical phone
 
@@ -178,7 +247,8 @@ EAS Build (note that EAS uploads the project to Expo's build servers).
 
 ### App size
 
-A release APK is **11.3 MB** (79.4 MB before the changes below). Most of what remains is React
+A release APK is **11.3 MB** (79.4 MB before the changes below; walk/run parts, auto-pause,
+intervals, weekly/monthly goals, the routes map and the widget added about 40 KB). Most of what remains is React
 Native, Hermes and Expo modules (6 MB of compressed native code), 2.5 MB of Java/Kotlin code and
 1.4 MB of JavaScript (including the map library); fonts are 0.24 MB.
 
@@ -304,15 +374,17 @@ kept), schema version in `PRAGMA user_version`, migrations in
 
 | Table | Purpose |
 |-------|---------|
-| `activities` | One row per workout: type, status (`recording`/`paused`/`recovering`/`completed`), start/end, elapsed/active seconds, distance (m), average pace/speed, GPS quality JSON, route preview |
-| `route_points` | Every fix: position, timestamps (wall + monotonic), accuracy, altitude, speed, bearing, segment distance, accepted flag, rejection reason, line breaks, gap length. FK → activities (cascade), unique (activity_id, sequence_number) |
-| `goals` | Versioned goals (`period_type`, target, `start_date`, enabled); daily used now, weekly/monthly ready |
+| `activities` | One row per workout: main type, status (`recording`/`paused`/`recovering`/`completed`), start/end, elapsed/active seconds, distance (m) and its walking/running parts, active seconds per part, average pace/speed, GPS quality JSON, route preview |
+| `route_points` | Every fix: position, timestamps (wall + monotonic), accuracy, altitude, speed, bearing, segment distance, accepted flag, rejection reason, line breaks, gap length, walk/run part (NULL before schema 2). FK → activities (cascade), unique (activity_id, sequence_number) |
+| `goals` | Versioned goals (`period_type` daily/weekly/monthly, target, `start_date`, enabled) |
 | `achievements` | Unlocked milestones, `achievement_type` UNIQUE |
-| `tracking_state` | Live-session state: journal cursor, filter state, distance, durations, recovery info |
+| `tracking_state` | Live-session state: journal cursor, filter state, distance per part, durations (incl. running time), recovery info |
 | `preferences` | Key/value user settings |
 
 Native files: `stride_tracking_journal.db` (raw fix journal) and the `stride_tracking_session`
-SharedPreferences (session state machine).
+SharedPreferences (session state machine, including auto-pause and the interval plan), and the
+`stride_widget` SharedPreferences (what the widget shows). Schema 2 added the walk/run columns;
+migrating fills them from each workout's type.
 
 ## Statistics, goals and achievements
 
@@ -323,10 +395,14 @@ SharedPreferences (session state machine).
 - Average pace over several activities = total eligible active time ÷ total eligible distance
   (never an average of paces). Division by zero yields "--".
 - Streak: consecutive local days with an eligible activity; today's streak survives until the day ends.
-- Daily goal: changing it applies from today; past days keep their goal.
+- Goals: daily, weekly and monthly, each on/off with its own target. Changing one writes a row
+  from today; a day, week or month is judged by the row in effect on its **last day**, so a
+  weekly goal set on Wednesday counts for that whole week, while past periods keep their goal.
+- A finished workout reports which goals it reached (it took the period's total across the
+  target); Home shows the daily ring and weekly/monthly bars.
 - Achievements are re-derived from saved activities (first activity, 1K, 5K, 10K, 25 km week,
-  100 km month, daily goal, 7-day streak, personal best distance). Deleting an activity
-  recalculates statistics, goal completion and achievements.
+  100 km month, daily, weekly and monthly goal reached, 7-day streak, personal best distance).
+  Deleting an activity recalculates statistics, goal completion and achievements.
 
 ## Privacy and data
 
@@ -339,7 +415,8 @@ SharedPreferences (session state machine).
   writes a JSON file and opens the share sheet so you choose where it goes; **Import backup**
   merges a file back (duplicates are skipped).
 - Permissions: precise location (while in use), notifications, foreground service (location),
-  internet (map tiles) and any normal permissions the libraries need. Unused permissions pulled in
+  vibration (interval cues), internet (map tiles) and any normal permissions the libraries need.
+  Voice cues use the phone's own text-to-speech engine, which works offline. Unused permissions pulled in
   by libraries (background location, boot, overlay, storage, audio) are removed in `app.json`.
 
 ## Testing
@@ -351,13 +428,15 @@ npm test
 - `tests/unit`: geodesy, GPS filter on synthetic traces (stationary noise, straight walk, slow
   walk, running loop with turns, zig-zags, duplicates, out-of-order, jump, relocation, short and
   long gaps, low accuracy, pause/resume, recovery after a reboot, state persistence),
-  pace/format, statistics (incl. midnight crossing), goals, achievements, route geometry and
-  replay, the WebView map page, and one-shot route requests (Home's start buttons, the
-  notification's Finish).
+  pace/format, statistics (incl. midnight crossing), daily/weekly/monthly goals, achievements,
+  run/walk interval timing, route geometry (incl. walk/run parts) and replay, the WebView map
+  page, and one-shot route requests (Home's start buttons, the notification's Finish).
 - `tests/integration`: the tracking engine and repositories against real SQLite (Node's
   `node:sqlite`) with `tests/support/fakeNative.ts` mirroring the service: lifecycle, duplicate
   prevention, exactly-once journal processing, JS restart, process kill/recovery, finish after
-  crash, orphaned sessions, replay from stored points, deletion side effects, backups.
+  crash, orphaned sessions, walk/run switching (incl. after a JS restart), auto-pause, intervals,
+  goals reached on finish, the widget's numbers, replay from stored points, deletion side effects,
+  backups.
 - Real-device procedure and results log: [`docs/FIELD_TESTING.md`](docs/FIELD_TESTING.md).
 - Emulator smoke test: start an emulator with a *Google APIs* image, install the debug build and
   run `powershell -File scripts/emulator-walk.ps1` (simulated walk via `adb emu geo fix`).
@@ -372,6 +451,8 @@ npm test
 | Recording stops after a while with the screen off | Settings → Battery optimisation → *Unrestricted*; disable battery saver; some brands need extra steps (see dontkillmyapp.com). |
 | Map is blank or shows the route sketch | No internet the first time an area is viewed (tiles are cached afterwards). The route is still recorded. |
 | Emulator map never loads ("Map needs an internet connection…") | The emulator cannot resolve DNS: it forwards to the host's first DNS server, which may be an inactive adapter's or an internal resolver that does not answer. Start it with `emulator -avd <name> -dns-server 8.8.8.8,1.1.1.1`; `adb shell ping -c 1 tiles.openfreemap.org` should then print an address (the ping itself goes unanswered — the emulator does not forward ICMP). |
+| No voice at interval changes (vibration works) | Install or enable a text-to-speech engine and its English voice (Settings → System → Languages → Text-to-speech). |
+| Widget says "Open Stride to see today's distance" | Open the app once after installing; it fills the widget. |
 | GPS stays "Searching" | Go outdoors, enable location (high accuracy), wait 30–60 s; "Start anyway" appears after 45 s. |
 | Debug app shows the splash forever | Metro not reachable: run `npx expo start`, `adb reverse tcp:8081 tcp:8081`; on Android 17 allow the debug-only local-network permission. |
 | `Filename longer than 260 characters` (Windows) | See [Windows notes](#windows-notes). |
@@ -382,12 +463,13 @@ npm test
 
 ```
 src/app/                 Expo Router screens: (tabs)/index, track, history, statistics, settings;
-                         activity/[id], goals, diagnostics
+                         activity/[id], goals, routes (all routes), diagnostics
 src/components/          Reusable UI (metrics, buttons, map, route sketch, charts, banners, floating
                          tab bar, goal ring, holographic stickers, SVG icons…)
 src/components/map/      WebView map page; vendor/ holds MapLibre GL JS (npm run vendor:maplibre)
 src/constants/           Design tokens ("Afterglow": colours, type, radii) and the font set
-src/features/tracking/   GPS filter, quality, config, engine, permissions
+src/features/tracking/   GPS filter, quality, config, engine, run/walk intervals, permissions
+src/features/widget/     Keeps the home-screen widget's numbers up to date
 src/features/activities/ Route geometry, replay, activity services
 src/features/statistics/ Statistics rules, dashboard data
 src/features/goals/      Goals rules and service
@@ -395,7 +477,8 @@ src/features/achievements/
 src/features/backup/     Export/import
 src/database/            SQLite connection, migrations, repositories, write queue
 src/hooks/, src/utils/   Hooks; geodesy, pace, dates, formatting
-modules/android-location Kotlin foreground service, journal, session state, Expo module
+modules/android-location Kotlin foreground service, journal, session state (parts, auto-pause,
+                         intervals), voice/vibration cues, home-screen widget, Expo module
 modules/app-database     The app database on Android's built-in SQLite (Expo module)
 assets/fonts/            Latin subsets of the app's fonts with their licences (npm run fonts:subset)
 plugins/                 Config plugins (Windows CMake paths, release signing, English-only resources)
@@ -418,5 +501,9 @@ scripts/subset-fonts.js  Regenerates assets/fonts (needs Python 3 with fontTools
   recording until the app is opened again.
 - An activity crossing midnight counts entirely for the day it started.
 - Map tiles need internet the first time an area is viewed; there is no explicit offline-region download.
-- The weekly/monthly goal types exist in the schema but only the daily goal has UI.
+- Auto-pause and intervals follow the active clock in the service; with no GPS speed (e.g. a
+  phone without GNSS) auto-pause never triggers. Voice cues need a text-to-speech engine.
+- The widget's "today" total is written by the app whenever it saves, deletes or imports
+  workouts or changes a goal; after midnight the widget drops it by itself (within its 30-minute
+  refresh) until the app runs again.
 - Release APKs contain arm64-v8a code only and English resources only (see [App size](#app-size)).

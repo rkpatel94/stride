@@ -1,10 +1,13 @@
 import { listAchievements } from '@/database/achievementRepository';
 import { createActivity, getActivity, listUnfinishedActivities, updateLiveProgress } from '@/database/activityRepository';
+import { upsertGoal } from '@/database/goalRepository';
 import { countRoutePoints, getRoutePoints, sumAcceptedDistance } from '@/database/routePointRepository';
 import { getTrackingState } from '@/database/trackingStateRepository';
 import { buildReplayTimeline } from '@/features/activities/replay';
 import type { Measurement } from '@/features/tracking/gpsFilter';
 import { TrackingEngine } from '@/features/tracking/trackingEngine';
+import { widgetSummary } from '@/features/widget/widgetSync';
+import { localDayKey } from '@/utils/dates';
 import { destinationPoint } from '@/utils/geo';
 
 import { resetSequence, routeTrace, T0 } from '../fixtures/traces';
@@ -285,8 +288,8 @@ describe('journal processing and recovery', () => {
   it('offers every interrupted workout in turn, then allows a new one', async () => {
     const first = await createActivity(db, { type: 'walk', startedAt: T0 });
     const second = await createActivity(db, { type: 'run', startedAt: T0 + 3_600_000 });
-    await updateLiveProgress(db, first, { distanceMeters: 500, elapsedSeconds: 400, activeSeconds: 380 });
-    await updateLiveProgress(db, second, { distanceMeters: 900, elapsedSeconds: 300, activeSeconds: 290 });
+    await updateLiveProgress(db, first, { distanceMeters: 500, walkDistanceMeters: 500, runDistanceMeters: 0, elapsedSeconds: 400, activeSeconds: 380 });
+    await updateLiveProgress(db, second, { distanceMeters: 900, walkDistanceMeters: 0, runDistanceMeters: 900, elapsedSeconds: 300, activeSeconds: 290 });
 
     const engine = newEngine();
     await engine.initialize();
@@ -336,5 +339,137 @@ describe('route replay from stored measurements', () => {
     expect(timeline.totalDistanceMeters).toBeCloseTo((await getActivity(db, activityId))?.distanceMeters ?? -1, 6);
     expect(timeline.durationSeconds).toBeGreaterThan(90);
     expect(timeline.keyframes[0]).toMatchObject({ latitude: accepted[0].latitude, longitude: accepted[0].longitude });
+  });
+});
+
+describe('walk/run parts, auto-pause and intervals', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('splits distance and active time between walking and running, and saves the main type', async () => {
+    const engine = newEngine();
+    await engine.initialize();
+    const activityId = await engine.start('walk');
+    const walk = routeTrace([{ bearing: 90, meters: 300 }], 1.4, { seed: 11 });
+    feed(walk.fixes);
+    await engine.syncNow();
+
+    await engine.switchType('run');
+    expect(engine.getSnapshot().activityType).toBe('run');
+    // The live row follows the current part (the saved workout gets its main type).
+    expect((await getActivity(db, activityId))?.type).toBe('run');
+    const run = routeTrace([{ bearing: 90, meters: 600 }], 3, { seed: 12, start: walk.end, startSecond: walk.endSecond + 1 });
+    feed(run.fixes);
+    await engine.syncNow();
+    const live = engine.getSnapshot();
+    expect(live.walkDistanceMeters).toBeGreaterThan(270);
+    expect(live.runDistanceMeters).toBeGreaterThan(540);
+    expect(live.geometry.lineTypes).toEqual(['walk', 'run']);
+
+    await engine.finish();
+    const activity = await getActivity(db, activityId);
+    if (!activity) throw new Error('activity missing');
+    expect(activity.type).toBe('run');
+    expect(activity.walkDistanceMeters).toBeGreaterThan(270);
+    expect(activity.walkDistanceMeters).toBeLessThan(330);
+    expect(activity.runDistanceMeters).toBeGreaterThan(540);
+    expect(activity.walkDistanceMeters + activity.runDistanceMeters).toBeCloseTo(activity.distanceMeters, 6);
+    expect(activity.runActiveSeconds).toBeGreaterThan(190);
+    expect(activity.walkActiveSeconds).toBeGreaterThan(200);
+    expect(activity.walkActiveSeconds + activity.runActiveSeconds).toBeCloseTo(activity.activeDurationSeconds ?? -1, 3);
+    const points = await getRoutePoints(db, activityId);
+    expect(new Set(points.map((point) => point.activityType))).toEqual(new Set(['walk', 'run']));
+  });
+
+  it('restores the parts after the JS runtime restarts', async () => {
+    const first = newEngine();
+    await first.initialize();
+    await first.start('run');
+    const run = routeTrace([{ bearing: 0, meters: 200 }], 3, { seed: 13 });
+    feed(run.fixes);
+    await first.syncNow();
+    await first.switchType('walk');
+    feed(routeTrace([{ bearing: 0, meters: 100 }], 1.4, { seed: 14, start: run.end, startSecond: run.endSecond + 1 }).fixes);
+    await first.syncNow();
+    const before = first.getSnapshot();
+    first.dispose();
+
+    const second = newEngine();
+    await second.initialize();
+    const after = second.getSnapshot();
+    expect(after.activityType).toBe('walk');
+    expect(after.walkDistanceMeters).toBeCloseTo(before.walkDistanceMeters, 6);
+    expect(after.runDistanceMeters).toBeCloseTo(before.runDistanceMeters, 6);
+    expect(after.geometry.lineTypes).toEqual(['run', 'walk']);
+  });
+
+  it('stops the active clock while auto-paused and can be turned off mid-workout', async () => {
+    const engine = newEngine();
+    await engine.initialize();
+    await engine.start('run', { autoPause: true });
+    expect(engine.getSnapshot().autoPauseEnabled).toBe(true);
+    native.advance(30_000);
+
+    native.setAutoPaused(true);
+    await settle();
+    expect(engine.getSnapshot()).toMatchObject({ phase: 'recording', autoPaused: true, durationsTicking: false, elapsedTicking: true });
+    native.advance(60_000);
+    expect(native.session?.activeMs).toBe(30_000);
+
+    native.setAutoPaused(false);
+    await settle();
+    expect(engine.getSnapshot()).toMatchObject({ autoPaused: false, durationsTicking: true });
+
+    await engine.setAutoPause(false);
+    expect(engine.getSnapshot().autoPauseEnabled).toBe(false);
+    native.setAutoPaused(true); // ignored once auto-pause is off
+    await settle();
+    expect(engine.getSnapshot().autoPaused).toBe(false);
+  });
+
+  it('follows run/walk intervals, counting every phase for its part', async () => {
+    const engine = newEngine();
+    await engine.initialize();
+    const activityId = await engine.start('walk', { intervals: { runSeconds: 60, walkSeconds: 60, repeats: 2 } });
+    expect(engine.getSnapshot()).toMatchObject({ activityType: 'run', intervals: { runSeconds: 60, walkSeconds: 60, repeats: 2 } });
+
+    feed(routeTrace([{ bearing: 0, meters: 480 }], 2, { seed: 15 }).fixes);
+    await settle();
+    await engine.finish();
+    const activity = await getActivity(db, activityId);
+    if (!activity) throw new Error('activity missing');
+    expect(activity.runActiveSeconds).toBeCloseTo(120, 0);
+    expect(activity.walkActiveSeconds).toBeCloseTo(121, 0);
+    expect(activity.runDistanceMeters).toBeGreaterThan(200);
+    expect(activity.walkDistanceMeters).toBeGreaterThan(200);
+    expect(activity.type).toBe(activity.runDistanceMeters > activity.walkDistanceMeters ? 'run' : 'walk');
+    const types = (await getRoutePoints(db, activityId, { acceptedOnly: true })).map((point) => point.activityType);
+    // run, walk, run, walk: three switches.
+    expect(types.filter((type, index) => index > 0 && type !== types[index - 1])).toHaveLength(3);
+  });
+
+  it('reports which goals a finished workout reached', async () => {
+    await upsertGoal(db, { periodType: 'weekly', targetDistanceMeters: 500, startDate: '2020-01-01', enabled: true });
+    const engine = newEngine();
+    await engine.initialize();
+    await engine.start('walk');
+    feed(routeTrace([{ bearing: 90, meters: 600 }], 1.4, { seed: 16 }).fixes);
+    const result = await engine.finish();
+    expect(result.goalsReached).toEqual(['weekly']);
+    expect(engine.getSnapshot().lastCompleted?.goalsReached).toEqual(['weekly']);
+  });
+
+  it("gives the widget today's saved distance and the daily goal", async () => {
+    await upsertGoal(db, { periodType: 'daily', targetDistanceMeters: 4000, startDate: '2020-01-01', enabled: true });
+    const engine = newEngine();
+    await engine.initialize();
+    await engine.start('walk');
+    feed(routeTrace([{ bearing: 90, meters: 300 }], 1.4, { seed: 17 }).fixes);
+    const { activityId } = await engine.finish();
+    const saved = (await getActivity(db, activityId))?.distanceMeters ?? -1;
+
+    const summary = await widgetSummary(db, T0 + 3_600_000, 'stride');
+    expect(summary).toMatchObject({ todayMeters: saved, goalMeters: 4000, scheme: 'stride' });
+    expect(summary.dayKey).toBe(localDayKey(T0 + 3_600_000));
+    expect((await widgetSummary(db, T0 + 3 * 86_400_000, 'stride')).todayMeters).toBe(0);
   });
 });

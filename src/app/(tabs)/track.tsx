@@ -1,7 +1,7 @@
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { router, useFocusEffect, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, AppState, Pressable, StyleSheet, Switch, View } from 'react-native';
 
 import AndroidLocation, { type DeviceLocationStatus } from '@/modules/android-location';
 
@@ -10,11 +10,12 @@ import { Button } from '@/components/Button';
 import { confirm, showError } from '@/components/confirm';
 import { Banner } from '@/components/Feedback';
 import { GpsStatusBadge } from '@/components/GpsStatusBadge';
+import { Icon } from '@/components/Icon';
 import { Metric } from '@/components/MetricCard';
 import { RouteMap } from '@/components/RouteMap';
 import { Screen } from '@/components/Screen';
 import { SegmentedControl } from '@/components/SegmentedControl';
-import { glow, Radius, Spacing, withAlpha } from '@/constants/theme';
+import { glow, Radius, Spacing, TouchTarget, withAlpha } from '@/constants/theme';
 import { getDatabase } from '@/database/database';
 import { getPreferences, setPreference, type Preferences } from '@/database/preferencesRepository';
 import { serializeWrite } from '@/database/writeQueue';
@@ -22,6 +23,13 @@ import { emptyGeometry } from '@/features/activities/routeGeometry';
 import type { ActivityType } from '@/features/activities/types';
 import { trackingEngine } from '@/features/tracking/engineInstance';
 import { signalLevelFor } from '@/features/tracking/gpsQuality';
+import {
+  intervalPosition,
+  planTotalSeconds,
+  stepPhaseSeconds,
+  stepRepeats,
+  type IntervalPlan,
+} from '@/features/tracking/intervals';
 import {
   describeInterruption,
   getDeviceStatus,
@@ -34,15 +42,24 @@ import {
   type LocationAccess,
 } from '@/features/tracking/permissions';
 import { TRACKING_CONFIG } from '@/features/tracking/trackingConfig';
+import type { StartOptions } from '@/features/tracking/trackingEngine';
 import { useTheme } from '@/hooks/use-theme';
 import { useRouteRequest } from '@/hooks/useRouteRequest';
 import { liveDurations, useLocationPreview, useTicker, useTrackingSnapshot } from '@/hooks/useTracking';
-import { formatAccuracy, formatDistance, formatDuration, formatKilometers, formatPace, formatSpeed } from '@/utils/format';
+import {
+  formatAccuracy,
+  formatDistance,
+  formatDuration,
+  formatDurationShort,
+  formatKilometers,
+  formatPace,
+  formatSpeed,
+} from '@/utils/format';
 import { averagePaceSecondsPerKm, averageSpeedMps, paceFromSpeed } from '@/utils/pace';
 
 const monotonicNow = () => globalThis.performance?.now?.() ?? Date.now();
 
-type Preparing = { type: ActivityType; startedAt: number };
+type Preparing = { type: ActivityType; startedAt: number; options: StartOptions };
 
 export default function TrackScreen() {
   const theme = useTheme();
@@ -104,13 +121,21 @@ export default function TrackScreen() {
     };
   }, [keepAwake]);
 
+  /** Saves a workout option right away, so the next start (and Settings) use it. */
+  const updatePreference = useCallback(<K extends keyof Preferences>(key: K, value: Preferences[K]) => {
+    setPreferences((current) => (current ? { ...current, [key]: value } : current));
+    void getDatabase()
+      .then((db) => serializeWrite(() => setPreference(db, key, value)))
+      .catch((error: unknown) => showError('Could not save the setting', error));
+  }, []);
+
   // Guards against starting twice when several good fixes arrive while start() is in flight.
   const startingRef = useRef(false);
-  const beginRecording = useCallback((type: ActivityType) => {
+  const beginRecording = useCallback((request: Preparing) => {
     if (startingRef.current) return;
     startingRef.current = true;
     trackingEngine
-      .start(type)
+      .start(request.type, request.options)
       .then(
         () => setPreparing(null),
         (error: unknown) => {
@@ -123,47 +148,48 @@ export default function TrackScreen() {
       });
   }, []);
 
-  /** Start workflow: permissions → location services → notifications → first good fix → record. */
-  const startFlow = useCallback(
-    async (type: ActivityType) => {
-      setMessage(null);
-      setActivityType(type);
-      if (!AndroidLocation) {
-        setMessage('GPS tracking needs the Stride development or release build; it is not available in Expo Go.');
+  /**
+   * Start workflow: permissions → location services → notifications → first good fix → record.
+   * Without `options` (Home's and the widget's start buttons) the saved auto-pause setting is
+   * used and there are no intervals: those start from this screen, where they are shown.
+   */
+  const startFlow = useCallback(async (type: ActivityType, options?: StartOptions) => {
+    setMessage(null);
+    setActivityType(type);
+    if (!AndroidLocation) {
+      setMessage('GPS tracking needs the Stride development or release build; it is not available in Expo Go.');
+      return;
+    }
+    let currentAccess = await getLocationAccess();
+    if (currentAccess !== 'precise') currentAccess = await requestLocationAccess();
+    setAccess(currentAccess);
+    if (currentAccess === 'approximate') {
+      setMessage('Precise location is off. Walking and running distance needs precise location — allow it in app settings.');
+      return;
+    }
+    if (currentAccess !== 'precise') {
+      setMessage('Location permission is needed to record your route.');
+      return;
+    }
+    let status = await getDeviceStatus();
+    if (status && !status.locationEnabled) {
+      const enabled = await requestLocationServices();
+      status = await getDeviceStatus();
+      if (!enabled) {
+        setDevice(status);
+        setMessage('Turn on location to start recording.');
         return;
       }
-      let currentAccess = await getLocationAccess();
-      if (currentAccess !== 'precise') currentAccess = await requestLocationAccess();
-      setAccess(currentAccess);
-      if (currentAccess === 'approximate') {
-        setMessage('Precise location is off. Walking and running distance needs precise location — allow it in app settings.');
-        return;
-      }
-      if (currentAccess !== 'precise') {
-        setMessage('Location permission is needed to record your route.');
-        return;
-      }
-      let status = await getDeviceStatus();
-      if (status && !status.locationEnabled) {
-        const enabled = await requestLocationServices();
-        status = await getDeviceStatus();
-        if (!enabled) {
-          setDevice(status);
-          setMessage('Turn on location to start recording.');
-          return;
-        }
-      }
-      setDevice(status);
-      const db = await getDatabase();
-      const prefs = await getPreferences(db);
-      if (!prefs.notificationPermissionAsked) {
-        await requestNotificationPermission();
-        await serializeWrite(() => setPreference(db, 'notificationPermissionAsked', true));
-      }
-      setPreparing({ type, startedAt: monotonicNow() });
-    },
-    [],
-  );
+    }
+    setDevice(status);
+    const db = await getDatabase();
+    const prefs = await getPreferences(db);
+    if (!prefs.notificationPermissionAsked) {
+      await requestNotificationPermission();
+      await serializeWrite(() => setPreference(db, 'notificationPermissionAsked', true));
+    }
+    setPreparing({ type, startedAt: monotonicNow(), options: options ?? { autoPause: prefs.autoPause, intervals: null } });
+  }, []);
 
   // Once preparing, start as soon as a fresh, accurate enough fix is available.
   const previewFix = preview.fix;
@@ -171,11 +197,11 @@ export default function TrackScreen() {
     if (!preparing || !previewFix) return;
     const fresh = monotonicNow() - previewFix.receivedAt < TRACKING_CONFIG.maxFixAgeMs;
     if (fresh && previewFix.accuracyMeters !== null && previewFix.accuracyMeters <= TRACKING_CONFIG.startAccuracyMeters) {
-      beginRecording(preparing.type);
+      beginRecording(preparing);
     }
   }, [preparing, previewFix, beginRecording]);
 
-  // Deep links: Home's start buttons and the notification's Finish action.
+  // Deep links: Home's and the widget's start buttons, and the notification's Finish action.
   useRouteRequest(params.start, (type) => {
     router.setParams({ start: undefined });
     if (type !== 'walk' && type !== 'run') return;
@@ -239,10 +265,13 @@ export default function TrackScreen() {
   }
 
   if (!sessionActive) {
+    const intervalsOn = preferences?.intervalsEnabled === true;
     return (
       <IdleView
         activityType={activityType}
         onChangeType={setActivityType}
+        preferences={preferences}
+        onChangePreference={updatePreference}
         access={access}
         device={device}
         preview={preview}
@@ -250,12 +279,17 @@ export default function TrackScreen() {
         now={now}
         message={message ?? snapshot.error}
         busy={snapshot.busy || snapshot.phase === 'starting'}
-        onStart={() => void startFlow(activityType)}
+        onStart={() =>
+          void startFlow(intervalsOn ? 'run' : activityType, {
+            autoPause: preferences?.autoPause === true,
+            intervals: intervalsOn && preferences ? preferences.intervalPlan : null,
+          })
+        }
         onRequestPermission={() => {
           void requestLocationAccess().then(() => refreshDevice());
         }}
         onStartAnyway={() => {
-          if (preparing) beginRecording(preparing.type);
+          if (preparing) beginRecording(preparing);
         }}
         onCancelPreparing={() => setPreparing(null)}
       />
@@ -266,6 +300,7 @@ export default function TrackScreen() {
   const lastFixAge = snapshot.lastFixReceivedAt !== null ? now - snapshot.lastFixReceivedAt : null;
   const lost =
     snapshot.phase === 'recording' &&
+    !snapshot.autoPaused &&
     (snapshot.signalLost || (lastFixAge !== null && lastFixAge > TRACKING_CONFIG.signalLostAfterSeconds * 1000));
   const signal = signalLevelFor(snapshot.lastFix?.accuracyMeters ?? null, TRACKING_CONFIG.filter, {
     lost,
@@ -276,11 +311,13 @@ export default function TrackScreen() {
   const position = snapshot.lastFix
     ? { latitude: snapshot.lastFix.latitude, longitude: snapshot.lastFix.longitude, accuracyMeters: snapshot.lastFix.accuracyMeters }
     : null;
+  const live = snapshot.phase === 'recording' || snapshot.phase === 'paused';
+  const bothParts = snapshot.walkDistanceMeters > 0 && snapshot.runDistanceMeters > 0;
 
   return (
     <Screen>
       <View style={styles.statusRow}>
-        <StatePill phase={snapshot.phase} />
+        <StatePill phase={snapshot.phase} autoPaused={snapshot.autoPaused} />
         <GpsStatusBadge level={signal} accuracyMeters={snapshot.lastFix?.accuracyMeters ?? null} />
       </View>
 
@@ -305,15 +342,38 @@ export default function TrackScreen() {
       {lost && snapshot.locationServicesEnabled ? (
         <Banner tone="warning" title="GPS signal lost" message="Distance resumes when the signal returns. The route may have a gap here." />
       ) : null}
+      {snapshot.autoPaused ? (
+        <Banner tone="info" title="Auto-paused" message="You are standing still, so the active time is stopped. It continues when you move on." />
+      ) : null}
       {snapshot.lowBattery ? <Banner tone="warning" title="Battery is low" message="Android may stop tracking if the phone shuts down." /> : null}
       {snapshot.error ? <Banner tone="error" title="Something went wrong" message={snapshot.error} /> : null}
+
+      {snapshot.intervals && live ? <IntervalCard plan={snapshot.intervals} activeSeconds={durations.activeSeconds} /> : null}
 
       <View style={styles.mapBox}>
         <RouteMap geometry={snapshot.geometry} currentPosition={position} followCurrentPosition routeColor={accent} height={260} />
       </View>
 
+      {live ? (
+        <SegmentedControl
+          accessibilityLabel="Walking or running now"
+          options={[
+            { value: 'walk', label: 'Walking' },
+            { value: 'run', label: 'Running' },
+          ]}
+          value={snapshot.activityType ?? 'walk'}
+          onChange={(type) => run(() => trackingEngine.switchType(type), 'Could not switch')()}
+        />
+      ) : null}
+
       <View style={[styles.panel, { backgroundColor: theme.surface, borderColor: theme.border }]}>
         <Metric label="Distance" value={formatKilometers(snapshot.distanceMeters)} unit="km" size="large" accent={accent} />
+        {bothParts ? (
+          <View style={styles.parts}>
+            <PartLegend color={theme.walk} label={`Walked ${formatDistance(snapshot.walkDistanceMeters)} · ${formatDurationShort(durations.walkActiveSeconds)}`} />
+            <PartLegend color={theme.run} label={`Ran ${formatDistance(snapshot.runDistanceMeters)} · ${formatDurationShort(durations.runActiveSeconds)}`} />
+          </View>
+        ) : null}
         <View style={styles.metricRow}>
           <Metric label="Active time" value={formatDuration(durations.activeSeconds)} style={styles.metricCell} />
           <Metric label="Elapsed" value={formatDuration(durations.elapsedSeconds)} style={styles.metricCell} />
@@ -369,6 +429,16 @@ export default function TrackScreen() {
           </View>
         ) : null}
       </View>
+      {live ? (
+        <OptionRow
+          icon="motion-pause-outline"
+          title="Auto-pause"
+          caption="Stops the active time while you stand still."
+          value={snapshot.autoPauseEnabled}
+          disabled={snapshot.busy}
+          onChange={(enabled) => run(() => trackingEngine.setAutoPause(enabled), 'Could not change auto-pause')()}
+        />
+      ) : null}
       {snapshot.phase === 'paused' || snapshot.phase === 'recovering' ? (
         <Button label="Discard workout" icon="delete-outline" variant="ghost" disabled={snapshot.busy} onPress={() => void discard()} />
       ) : null}
@@ -379,6 +449,8 @@ export default function TrackScreen() {
 type IdleViewProps = {
   activityType: ActivityType;
   onChangeType: (type: ActivityType) => void;
+  preferences: Preferences | null;
+  onChangePreference: <K extends keyof Preferences>(key: K, value: Preferences[K]) => void;
   access: LocationAccess | null;
   device: DeviceLocationStatus | null;
   preview: ReturnType<typeof useLocationPreview>;
@@ -395,6 +467,8 @@ type IdleViewProps = {
 function IdleView({
   activityType,
   onChangeType,
+  preferences,
+  onChangePreference,
   access,
   device,
   preview,
@@ -416,21 +490,27 @@ function IdleView({
   const waitedSeconds = preparing ? (now - preparing.startedAt) / 1000 : 0;
   const timedOut = waitedSeconds > TRACKING_CONFIG.initialFixTimeoutSeconds;
   const batterySaverLimitsGps = device?.powerSaveMode === true && device.locationPowerSaveMode !== 0;
+  const intervalsOn = preferences?.intervalsEnabled === true;
+  const startType: ActivityType = intervalsOn ? 'run' : activityType;
 
   return (
     <Screen>
       <AppText variant="title" accessibilityRole="header">
         Track
       </AppText>
-      <SegmentedControl
-        accessibilityLabel="Activity type"
-        options={[
-          { value: 'walk', label: 'Walk' },
-          { value: 'run', label: 'Run' },
-        ]}
-        value={activityType}
-        onChange={onChangeType}
-      />
+      {intervalsOn ? (
+        <AppText color="textSecondary">Run/walk intervals are on: the workout starts with a run and switches by itself.</AppText>
+      ) : (
+        <SegmentedControl
+          accessibilityLabel="Activity type"
+          options={[
+            { value: 'walk', label: 'Walk' },
+            { value: 'run', label: 'Run' },
+          ]}
+          value={activityType}
+          onChange={onChangeType}
+        />
+      )}
 
       {!AndroidLocation ? (
         <Banner
@@ -490,7 +570,7 @@ function IdleView({
         geometry={emptyGeometry()}
         currentPosition={fresh ? { latitude: fix.latitude, longitude: fix.longitude, accuracyMeters: fix.accuracyMeters } : null}
         followCurrentPosition
-        routeColor={activityType === 'run' ? theme.run : theme.walk}
+        routeColor={startType === 'run' ? theme.run : theme.walk}
         height={280}
       />
 
@@ -518,14 +598,17 @@ function IdleView({
           </View>
         </View>
       ) : (
-        <Button
-          label={activityType === 'run' ? 'Start run' : 'Start walk'}
-          icon={activityType === 'run' ? 'run-fast' : 'walk'}
-          variant={activityType}
-          size="large"
-          loading={busy}
-          onPress={onStart}
-        />
+        <>
+          {preferences ? <WorkoutOptions preferences={preferences} onChange={onChangePreference} /> : null}
+          <Button
+            label={intervalsOn ? 'Start intervals' : activityType === 'run' ? 'Start run' : 'Start walk'}
+            icon={intervalsOn ? 'timer-sync-outline' : activityType === 'run' ? 'run-fast' : 'walk'}
+            variant={startType}
+            size="large"
+            loading={busy}
+            onPress={onStart}
+          />
+        </>
       )}
       {message ? <Banner tone="error" title="Could not start" message={message} /> : null}
       <AppText variant="caption" color="textMuted" align="center">
@@ -535,21 +618,198 @@ function IdleView({
   );
 }
 
-function StatePill({ phase }: { phase: string }) {
+/** Auto-pause and run/walk intervals, saved as soon as they change. */
+function WorkoutOptions({
+  preferences,
+  onChange,
+}: {
+  preferences: Preferences;
+  onChange: <K extends keyof Preferences>(key: K, value: Preferences[K]) => void;
+}) {
+  const theme = useTheme();
+  const plan = preferences.intervalPlan;
+  const setPlan = (next: IntervalPlan) => onChange('intervalPlan', next);
+  return (
+    <View style={[styles.options, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+      <OptionRow
+        icon="motion-pause-outline"
+        title="Auto-pause"
+        caption="Stops the active time while you stand still, e.g. at traffic lights."
+        value={preferences.autoPause}
+        onChange={(value) => onChange('autoPause', value)}
+      />
+      <View style={[styles.divider, { backgroundColor: theme.border }]} />
+      <OptionRow
+        icon="timer-sync-outline"
+        title="Run/walk intervals"
+        caption="Alternate running and walking, with a voice cue and vibration at each switch."
+        value={preferences.intervalsEnabled}
+        onChange={(value) => onChange('intervalsEnabled', value)}
+      />
+      {preferences.intervalsEnabled ? (
+        <View style={styles.intervalSetup}>
+          <Stepper
+            label="Run"
+            value={formatDuration(plan.runSeconds)}
+            color={theme.run}
+            onStep={(direction) => setPlan({ ...plan, runSeconds: stepPhaseSeconds(plan.runSeconds, direction) })}
+          />
+          <Stepper
+            label="Walk"
+            value={formatDuration(plan.walkSeconds)}
+            color={theme.walk}
+            onStep={(direction) => setPlan({ ...plan, walkSeconds: stepPhaseSeconds(plan.walkSeconds, direction) })}
+          />
+          <Stepper
+            label="Rounds"
+            value={String(plan.repeats)}
+            color={theme.text}
+            onStep={(direction) => setPlan({ ...plan, repeats: stepRepeats(plan.repeats, direction) })}
+          />
+          <AppText variant="caption" color="textMuted">
+            {formatDurationShort(planTotalSeconds(plan))} in total. Starts with a run; paused and standing time don&apos;t count.
+          </AppText>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function OptionRow({
+  icon,
+  title,
+  caption,
+  value,
+  disabled = false,
+  onChange,
+}: {
+  icon: 'motion-pause-outline' | 'timer-sync-outline';
+  title: string;
+  caption: string;
+  value: boolean;
+  disabled?: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  const theme = useTheme();
+  return (
+    <View style={styles.optionRow}>
+      <Icon name={icon} size={22} color={value ? theme.accent : theme.textMuted} />
+      <View style={styles.flex}>
+        <AppText weight="600">{title}</AppText>
+        <AppText variant="caption" color="textSecondary">
+          {caption}
+        </AppText>
+      </View>
+      <Switch
+        value={value}
+        disabled={disabled}
+        onValueChange={onChange}
+        accessibilityLabel={title}
+        trackColor={{ true: theme.primary, false: theme.border }}
+        thumbColor={value ? theme.onPrimary : theme.textMuted}
+      />
+    </View>
+  );
+}
+
+function Stepper({ label, value, color, onStep }: { label: string; value: string; color: string; onStep: (direction: 1 | -1) => void }) {
+  const theme = useTheme();
+  const button = (direction: 1 | -1) => (
+    <Pressable
+      onPress={() => onStep(direction)}
+      accessibilityRole="button"
+      accessibilityLabel={`${direction > 0 ? 'More' : 'Less'} ${label.toLowerCase()}`}
+      hitSlop={4}
+      style={({ pressed }) => [styles.stepButton, { backgroundColor: pressed ? theme.border : theme.surfaceAlt, borderColor: theme.border }]}>
+      <Icon name={direction > 0 ? 'plus' : 'minus'} size={20} color={theme.text} />
+    </Pressable>
+  );
+  return (
+    <View style={styles.stepper} accessible={false}>
+      <AppText weight="600" style={styles.flex}>
+        {label}
+      </AppText>
+      {button(-1)}
+      <AppText variant="heading" tint={color} align="center" style={styles.stepValue} accessibilityLabel={`${label} ${value}`}>
+        {value}
+      </AppText>
+      {button(1)}
+    </View>
+  );
+}
+
+/** The current interval phase with a countdown, driven by the active clock. */
+function IntervalCard({ plan, activeSeconds }: { plan: IntervalPlan; activeSeconds: number }) {
+  const theme = useTheme();
+  const position = intervalPosition(plan, activeSeconds);
+  const done = position.kind === 'done';
+  const color = done ? theme.success : position.kind === 'run' ? theme.run : theme.walk;
+  const next = position.kind === 'run' ? 'then walk' : position.round === position.rounds ? 'then done' : 'then run';
+  const title = done ? 'INTERVALS DONE' : `${position.kind === 'run' ? 'RUN' : 'WALK'} · ROUND ${position.round} OF ${position.rounds}`;
+  return (
+    <View
+      style={[styles.intervalCard, { backgroundColor: theme.surface, borderColor: withAlpha(color, 0.55) }]}
+      accessible
+      accessibilityLabel={
+        done
+          ? 'Intervals done'
+          : `${position.kind === 'run' ? 'Run' : 'Walk'}, round ${position.round} of ${position.rounds}, ${formatDuration(Math.ceil(position.remainingSeconds))} left`
+      }>
+      <View style={styles.intervalHeader}>
+        <AppText variant="label" weight="700" tint={color}>
+          {title}
+        </AppText>
+        <Icon name="timer-sync-outline" size={18} color={color} />
+      </View>
+      {done ? (
+        <AppText color="textSecondary">Keep going, or finish when you&apos;re ready.</AppText>
+      ) : (
+        <>
+          <View style={styles.intervalValue}>
+            <AppText variant="hero" tint={color}>
+              {formatDuration(Math.ceil(position.remainingSeconds))}
+            </AppText>
+            <AppText color="textSecondary">left · {next}</AppText>
+          </View>
+          <View style={[styles.intervalTrack, { backgroundColor: theme.surfaceAlt }]}>
+            <View style={[styles.intervalFill, { width: `${Math.round(position.phaseFraction * 1000) / 10}%`, backgroundColor: color }]} />
+          </View>
+          <AppText variant="caption" color="textMuted">
+            {formatDurationShort(position.totalRemainingSeconds)} of intervals left
+          </AppText>
+        </>
+      )}
+    </View>
+  );
+}
+
+function PartLegend({ color, label }: { color: string; label: string }) {
+  return (
+    <View style={styles.partLegend}>
+      <View style={[styles.dot, { backgroundColor: color }]} />
+      <AppText variant="caption" color="textSecondary">
+        {label}
+      </AppText>
+    </View>
+  );
+}
+
+function StatePill({ phase, autoPaused }: { phase: string; autoPaused: boolean }) {
   const theme = useTheme();
   const config: Record<string, { label: string; color: string }> = {
     starting: { label: 'Preparing', color: theme.info },
-    recording: { label: 'Recording', color: theme.success },
+    recording: autoPaused ? { label: 'Auto-paused', color: theme.warning } : { label: 'Recording', color: theme.success },
     paused: { label: 'Paused', color: theme.warning },
     recovering: { label: 'Recovering', color: theme.danger },
     finishing: { label: 'Saving', color: theme.info },
   };
   const { label, color } = config[phase] ?? { label: phase, color: theme.textSecondary };
+  const ticking = phase === 'recording' && !autoPaused;
   return (
     <View
       style={[styles.pill, { borderColor: withAlpha(color, 0.45), backgroundColor: theme.surfaceAlt }]}
       accessibilityLabel={`Tracking state: ${label}`}>
-      <View style={[styles.dot, { backgroundColor: color }, phase === 'recording' ? glow(color, theme.scheme, 0.7) : null]} />
+      <View style={[styles.dot, { backgroundColor: color }, ticking ? glow(color, theme.scheme, 0.7) : null]} />
       <AppText variant="label" weight="700" tint={color}>
         {label.toUpperCase()}
       </AppText>
@@ -563,6 +823,8 @@ const styles = StyleSheet.create({
   statusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: Spacing.sm },
   mapBox: { height: 260 },
   panel: { borderRadius: Radius.lg, borderWidth: 1, padding: Spacing.screen, gap: Spacing.lg },
+  parts: { gap: Spacing.xs, marginTop: -Spacing.sm },
+  partLegend: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
   metricRow: { flexDirection: 'row', gap: Spacing.md },
   metricCell: { flex: 1 },
   controls: { flexDirection: 'row', gap: Spacing.md },
@@ -570,6 +832,25 @@ const styles = StyleSheet.create({
   saving: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, minHeight: 64 },
   preparing: { borderRadius: Radius.lg, borderWidth: 1, padding: Spacing.screen, gap: Spacing.md },
   preparingRow: { flexDirection: 'row', gap: Spacing.md, alignItems: 'center' },
+  options: { borderRadius: Radius.lg, borderWidth: 1, padding: Spacing.lg, gap: Spacing.md },
+  optionRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, minHeight: TouchTarget.min },
+  divider: { height: 1 },
+  intervalSetup: { gap: Spacing.sm },
+  stepper: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  stepButton: {
+    width: TouchTarget.min,
+    height: TouchTarget.min,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepValue: { minWidth: 72, fontVariant: ['tabular-nums'] },
+  intervalCard: { borderRadius: Radius.lg, borderWidth: 1.5, padding: Spacing.lg, gap: Spacing.sm },
+  intervalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  intervalValue: { flexDirection: 'row', alignItems: 'baseline', gap: Spacing.sm, flexWrap: 'wrap' },
+  intervalTrack: { height: 8, borderRadius: Radius.pill, overflow: 'hidden' },
+  intervalFill: { height: '100%', borderRadius: Radius.pill },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',

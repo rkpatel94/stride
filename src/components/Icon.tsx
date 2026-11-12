@@ -41,6 +41,8 @@ const ACHIEVEMENT_ICONS: Record<string, IconName> = {
   first_25k_week: 'calendar-week',
   first_100k_month: 'calendar-month',
   daily_goal_completed: 'target',
+  weekly_goal_completed: 'calendar-check',
+  monthly_goal_completed: 'calendar-star',
   streak_7_days: 'fire',
   personal_best_distance: 'lightning-bolt',
 };

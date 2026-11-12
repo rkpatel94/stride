@@ -22,6 +22,7 @@ type RoutePointRow = {
   rejection_reason: string | null;
   starts_new_line: number;
   gap_before_seconds: number | null;
+  activity_type: string | null;
 };
 
 const COLUMNS = [
@@ -41,9 +42,10 @@ const COLUMNS = [
   'rejection_reason',
   'starts_new_line',
   'gap_before_seconds',
+  'activity_type',
 ] as const;
 
-// 16 columns × 40 rows = 640 bound parameters, well under SQLite's limit.
+// 17 columns × 40 rows = 680 bound parameters, under the 999 of Android 7's SQLite.
 const ROWS_PER_STATEMENT = 40;
 
 function toParams(point: NewRoutePoint): SqlValue[] {
@@ -64,6 +66,7 @@ function toParams(point: NewRoutePoint): SqlValue[] {
     point.rejectionReason,
     point.startsNewLine ? 1 : 0,
     point.gapBeforeSeconds,
+    point.activityType,
   ];
 }
 
@@ -101,6 +104,7 @@ function mapPoint(row: RoutePointRow): RoutePoint {
     rejectionReason: row.rejection_reason,
     startsNewLine: row.starts_new_line === 1,
     gapBeforeSeconds: row.gap_before_seconds,
+    activityType: row.activity_type === 'walk' || row.activity_type === 'run' ? row.activity_type : null,
   };
 }
 

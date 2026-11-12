@@ -19,15 +19,18 @@ function activity(
   overrides: Partial<ActivitySummary> = {},
 ): ActivitySummary {
   const startedAt = start.getTime();
+  const type = overrides.type ?? 'walk';
   return {
     id: nextId++,
-    type: 'walk',
+    type,
     status: 'completed',
     startedAt,
     endedAt: startedAt + activeSeconds * 1000,
     distanceMeters,
     activeDurationSeconds: activeSeconds,
     elapsedDurationSeconds: activeSeconds,
+    walkDistanceMeters: type === 'walk' ? distanceMeters : 0,
+    runDistanceMeters: type === 'run' ? distanceMeters : 0,
     ...overrides,
   };
 }

@@ -39,19 +39,24 @@ class TrackingJournal private constructor(context: Context) :
         speed_mps REAL,
         bearing_deg REAL,
         provider TEXT,
-        is_mock INTEGER NOT NULL DEFAULT 0
+        is_mock INTEGER NOT NULL DEFAULT 0,
+        activity_type TEXT
       )
       """.trimIndent()
     )
     db.execSQL("CREATE INDEX journal_activity_seq ON journal(activity_id, seq)")
   }
 
-  override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+  override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+    // Version 2: the walk/run part each fix belongs to.
+    if (oldVersion < 2) db.execSQL("ALTER TABLE journal ADD COLUMN activity_type TEXT")
+  }
 
-  fun append(activityId: Long, segmentIndex: Int, location: Location): Long {
+  fun append(activityId: Long, segmentIndex: Int, activityType: String, location: Location): Long {
     val values = ContentValues().apply {
       put("activity_id", activityId)
       put("segment_index", segmentIndex)
+      put("activity_type", activityType)
       put("latitude", location.latitude)
       put("longitude", location.longitude)
       put("wall_time_ms", location.time)
@@ -91,7 +96,8 @@ class TrackingJournal private constructor(context: Context) :
             "speedMps" to doubleOrNull("speed_mps"),
             "bearingDegrees" to doubleOrNull("bearing_deg"),
             "provider" to cursor.getString(cursor.getColumnIndexOrThrow("provider")),
-            "isMock" to (cursor.getInt(cursor.getColumnIndexOrThrow("is_mock")) == 1)
+            "isMock" to (cursor.getInt(cursor.getColumnIndexOrThrow("is_mock")) == 1),
+            "activityType" to cursor.getString(cursor.getColumnIndexOrThrow("activity_type"))
           )
         )
       }
@@ -121,7 +127,7 @@ class TrackingJournal private constructor(context: Context) :
 
   companion object {
     private const val DB_NAME = "stride_tracking_journal.db"
-    private const val DB_VERSION = 1
+    private const val DB_VERSION = 2
 
     @Volatile
     private var instance: TrackingJournal? = null

@@ -10,7 +10,7 @@ import {
 import { listGoals, upsertGoal } from '@/database/goalRepository';
 import { LATEST_SCHEMA_VERSION, migrate } from '@/database/migrations';
 import { getPreferences, setPreference } from '@/database/preferencesRepository';
-import { countRoutePoints, insertRoutePoints, type NewRoutePoint } from '@/database/routePointRepository';
+import { countRoutePoints, getRoutePoints, insertRoutePoints, type NewRoutePoint } from '@/database/routePointRepository';
 import { newTrackingState, saveTrackingState, getTrackingState } from '@/database/trackingStateRepository';
 import { recomputeAchievements } from '@/features/achievements/achievementService';
 import { evaluateAchievements } from '@/features/achievements/achievements';
@@ -48,9 +48,15 @@ async function addCompletedActivity(startedAt: number, distanceMeters: number, t
     rejectionReason: null,
     startsNewLine: i === 0,
     gapBeforeSeconds: null,
+    activityType: type,
   }));
   await insertRoutePoints(db, rows);
   await completeActivity(db, id, {
+    type,
+    walkDistanceMeters: type === 'walk' ? distanceMeters : 0,
+    runDistanceMeters: type === 'run' ? distanceMeters : 0,
+    walkActiveSeconds: type === 'walk' ? 1800 : 0,
+    runActiveSeconds: type === 'run' ? 1800 : 0,
     endedAt: startedAt + 1_800_000,
     elapsedDurationSeconds: 1800,
     activeDurationSeconds: 1800,
@@ -68,6 +74,36 @@ describe('schema and migrations', () => {
     expect(await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version', [])).toEqual({ user_version: LATEST_SCHEMA_VERSION });
     await migrate(db);
     expect(await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version', [])).toEqual({ user_version: LATEST_SCHEMA_VERSION });
+  });
+
+  it('upgrades schema 1 data, taking the walk/run parts from each activity type', async () => {
+    const old = await createTestDatabase({ schemaVersion: 1 });
+    try {
+      await old.runAsync(
+        `INSERT INTO activities (id, type, status, started_at, distance_meters, active_duration_seconds, created_at, updated_at)
+         VALUES (1, 'walk', 'completed', 1, 1200, 900, 1, 1), (2, 'run', 'completed', 2, 5000, 1500, 2, 2), (3, 'run', 'recording', 3, 800, 240, 3, 3)`,
+        [],
+      );
+      await old.runAsync(
+        `INSERT INTO tracking_state (activity_id, state, distance_meters, active_duration_ms, elapsed_duration_ms, filter_state, updated_at)
+         VALUES (3, 'recording', 800, 240000, 250000, '{}', 3)`,
+        [],
+      );
+      await old.runAsync(
+        `INSERT INTO route_points (activity_id, sequence_number, segment_index, latitude, longitude, recorded_at)
+         VALUES (1, 0, 0, 51.5, -0.12, 1)`,
+        [],
+      );
+      await migrate(old);
+      expect(await old.getFirstAsync<{ user_version: number }>('PRAGMA user_version', [])).toEqual({ user_version: LATEST_SCHEMA_VERSION });
+      expect(await getActivity(old, 1)).toMatchObject({ type: 'walk', walkDistanceMeters: 1200, runDistanceMeters: 0, walkActiveSeconds: 900, runActiveSeconds: 0 });
+      expect(await getActivity(old, 2)).toMatchObject({ type: 'run', walkDistanceMeters: 0, runDistanceMeters: 5000, walkActiveSeconds: 0, runActiveSeconds: 1500 });
+      expect(await getTrackingState(old, 3)).toMatchObject({ walkDistanceMeters: 0, runDistanceMeters: 800, runActiveMs: 240_000 });
+      // Older points have no part; they take the activity's type when drawn and counted.
+      expect((await getRoutePoints(old, 1))[0].activityType).toBeNull();
+    } finally {
+      old.close();
+    }
   });
 
   it('refuses to open a database created by a newer app version', async () => {
@@ -106,6 +142,7 @@ describe('route points', () => {
         rejectionReason: null,
         startsNewLine: true,
         gapBeforeSeconds: null,
+        activityType: 'walk',
       },
     ]);
     expect((await countRoutePoints(db, id)).total).toBe(3);

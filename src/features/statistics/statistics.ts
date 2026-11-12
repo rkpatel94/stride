@@ -72,13 +72,12 @@ export function summarizePeriod(activities: ActivitySummary[], startMs: number, 
     summary.totalDistanceMeters += distance;
     summary.activityCount += 1;
     summary.activeDurationSeconds += activeSecondsOf(activity);
-    if (activity.type === 'run') {
-      summary.runDistanceMeters += distance;
-      summary.runCount += 1;
-    } else {
-      summary.walkDistanceMeters += distance;
-      summary.walkCount += 1;
-    }
+    // Distance by part (a workout can be part walk, part run); counts by main type, so walks and
+    // runs add up to the number of activities.
+    summary.walkDistanceMeters += Math.max(0, activity.walkDistanceMeters);
+    summary.runDistanceMeters += Math.max(0, activity.runDistanceMeters);
+    if (activity.type === 'run') summary.runCount += 1;
+    else summary.walkCount += 1;
     if (isEligible(activity)) {
       eligibleSeconds += activeSecondsOf(activity);
       eligibleMeters += distance;
@@ -112,10 +111,9 @@ export function dailyTotals(activities: ActivitySummary[], startMs: number, days
     if (!isCompleted(activity)) continue;
     const day = index.get(localDayKey(activity.startedAt));
     if (!day) continue;
-    const distance = distanceOf(activity);
-    if (activity.type === 'run') day.runMeters += distance;
-    else day.walkMeters += distance;
-    day.totalMeters += distance;
+    day.walkMeters += Math.max(0, activity.walkDistanceMeters);
+    day.runMeters += Math.max(0, activity.runDistanceMeters);
+    day.totalMeters += distanceOf(activity);
     day.activityCount += 1;
   }
   return result;

@@ -23,16 +23,32 @@ export type JournalPoint = RawLocation & {
   sequence: number;
   activityId: number;
   segmentIndex: number;
+  /** The walk/run part the fix was recorded in; null for fixes from an older app version. */
+  activityType: ActivityType | null;
+};
+
+/** Run/walk intervals: run, then walk, `repeats` times, timed on the active clock. */
+export type IntervalPlan = {
+  runSeconds: number;
+  walkSeconds: number;
+  repeats: number;
 };
 
 export type NativeTrackingStatus = {
   hasSession: boolean;
   serviceRunning: boolean;
   activityId: number | null;
+  /** The current walk/run part. */
   activityType: ActivityType | null;
   state: NativeSessionState;
   elapsedMs: number | null;
   activeMs: number | null;
+  /** The part of activeMs spent running. */
+  runActiveMs: number | null;
+  /** Recording but standing still: the active clock is stopped. */
+  autoPaused: boolean;
+  autoPauseEnabled: boolean;
+  intervals: IntervalPlan | null;
   startedAtWallMs: number | null;
   finishedAtWallMs: number | null;
   segmentIndex: number | null;
@@ -78,6 +94,24 @@ export type StartTrackingOptions = {
   openUri?: string;
   /** Deep link opened by the notification's Finish action (the app asks for confirmation). */
   finishUri?: string;
+  /** Stop the active clock while standing still. */
+  autoPause?: boolean;
+  /** Run/walk intervals (all three > 0), flattened for the native record. */
+  intervalRunSeconds?: number;
+  intervalWalkSeconds?: number;
+  intervalRepeats?: number;
+};
+
+/** What the home-screen widget shows besides a workout in progress. */
+export type WidgetSummary = {
+  /** Local day (YYYY-MM-DD) the totals are for; the widget shows 0 once that day is over. */
+  dayKey: string;
+  /** Distance of the workouts saved today. */
+  todayMeters: number;
+  /** The daily goal in effect today; 0 when there is none. */
+  goalMeters: number;
+  /** The app's URL scheme, for the widget's buttons. */
+  scheme: string;
 };
 
 export type AndroidLocationEvents = {

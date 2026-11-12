@@ -1,4 +1,4 @@
-import { migrate } from '@/database/migrations';
+import { migrate, MIGRATIONS } from '@/database/migrations';
 import type { SqlDatabase, SqlValue } from '@/database/types';
 
 type Statement = {
@@ -18,7 +18,8 @@ export type TestDatabase = SqlDatabase & { close(): void };
  * and the tracking engine run against a real SQLite engine in tests (same SQL, same constraints).
  * Loaded through process.getBuiltinModule so Jest's module resolver is bypassed.
  */
-export async function createTestDatabase(): Promise<TestDatabase> {
+/** A migrated in-memory database; `schemaVersion` stops at an older schema (for upgrade tests). */
+export async function createTestDatabase(options: { schemaVersion?: number } = {}): Promise<TestDatabase> {
   const sqlite = process.getBuiltinModule('node:sqlite') as unknown as NodeSqlite;
   const raw = new sqlite.DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys = ON;');
@@ -53,6 +54,13 @@ export async function createTestDatabase(): Promise<TestDatabase> {
       raw.close();
     },
   };
-  await migrate(db);
+  if (options.schemaVersion === undefined) {
+    await migrate(db);
+  } else {
+    for (const migration of MIGRATIONS.filter((entry) => entry.version <= (options.schemaVersion ?? 0))) {
+      raw.exec(migration.sql);
+      raw.exec(`PRAGMA user_version = ${migration.version}`);
+    }
+  }
   return db;
 }

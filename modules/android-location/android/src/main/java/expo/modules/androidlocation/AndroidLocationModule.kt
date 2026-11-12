@@ -40,6 +40,19 @@ class StartTrackingOptions : Record {
 
   @Field
   val finishUri: String? = null
+
+  @Field
+  val autoPause: Boolean = false
+
+  /** Run/walk intervals; all three must be positive, otherwise there are none. */
+  @Field
+  val intervalRunSeconds: Double = 0.0
+
+  @Field
+  val intervalWalkSeconds: Double = 0.0
+
+  @Field
+  val intervalRepeats: Double = 0.0
 }
 
 /**
@@ -118,6 +131,11 @@ class AndroidLocationModule : Module() {
         promise.reject("ERR_INVALID_ARGUMENT", "activityId must be a positive integer.", null)
         return@AsyncFunction
       }
+      val intervals = IntervalPlan(
+        runMs = (options.intervalRunSeconds * 1000).toLong(),
+        walkMs = (options.intervalWalkSeconds * 1000).toLong(),
+        repeats = options.intervalRepeats.toInt()
+      )
       try {
         TrackingController.begin(
           ctx,
@@ -125,7 +143,9 @@ class AndroidLocationModule : Module() {
           activityType = if (options.activityType == "run") "run" else "walk",
           intervalMs = options.intervalMs.toLong().coerceIn(MIN_INTERVAL_MS, MAX_INTERVAL_MS),
           openUri = options.openUri,
-          finishUri = options.finishUri
+          finishUri = options.finishUri,
+          autoPauseEnabled = options.autoPause,
+          intervals = intervals.takeIf { it.isValid() }
         )
       } catch (error: TrackingStateException) {
         promise.reject(error.code, error.message, error)
@@ -182,6 +202,29 @@ class AndroidLocationModule : Module() {
       TrackingService.statusSnapshot(ctx)
     }
 
+    AsyncFunction("switchActivityTypeAsync") { activityType: String ->
+      val ctx = context
+      TrackingController.switchType(ctx, if (activityType == "run") "run" else "walk")
+        ?: throw CodedException("ERR_NO_SESSION", "There is no workout to switch.", null)
+      TrackingService.instance?.applySession()
+      StrideWidget.refresh(ctx)
+      TrackingService.statusSnapshot(ctx)
+    }
+
+    AsyncFunction("setAutoPauseAsync") { enabled: Boolean ->
+      val ctx = context
+      TrackingController.setAutoPauseEnabled(ctx, enabled)
+      TrackingService.instance?.applySession()
+      TrackingService.statusSnapshot(ctx)
+    }
+
+    AsyncFunction("updateWidgetAsync") { summary: Map<String, Any?> ->
+      val ctx = context
+      StrideWidget.save(ctx, summary)
+      StrideWidget.refresh(ctx)
+      true
+    }
+
     AsyncFunction("discardTrackingAsync") {
       val ctx = context
       // Clear first: stopService is asynchronous, and a service destroyed while the session still
@@ -189,6 +232,7 @@ class AndroidLocationModule : Module() {
       TrackingController.clear(ctx, null)
       ctx.stopService(Intent(ctx, TrackingService::class.java))
       TrackingNotifications.cancelInterrupted(ctx)
+      StrideWidget.refresh(ctx)
       TrackingService.statusSnapshot(ctx)
     }
 
@@ -200,6 +244,7 @@ class AndroidLocationModule : Module() {
       }
       TrackingController.clear(ctx, activityId.toLong())
       TrackingNotifications.cancelInterrupted(ctx)
+      StrideWidget.refresh(ctx)
       true
     }
 

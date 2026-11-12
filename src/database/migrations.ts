@@ -92,6 +92,31 @@ export const MIGRATIONS: { version: number; sql: string }[] = [
       );
     `,
   },
+  {
+    version: 2,
+    sql: `
+      -- Walk and run parts: a workout can switch between walking and running. The activity keeps
+      -- per-type totals; each route point records the type it was recorded as (NULL for older
+      -- points, which take the activity's type).
+      ALTER TABLE activities ADD COLUMN walk_distance_meters REAL NOT NULL DEFAULT 0;
+      ALTER TABLE activities ADD COLUMN run_distance_meters REAL NOT NULL DEFAULT 0;
+      ALTER TABLE activities ADD COLUMN walk_active_seconds REAL NOT NULL DEFAULT 0;
+      ALTER TABLE activities ADD COLUMN run_active_seconds REAL NOT NULL DEFAULT 0;
+      UPDATE activities SET
+        walk_distance_meters = CASE WHEN type = 'walk' THEN distance_meters ELSE 0 END,
+        run_distance_meters = CASE WHEN type = 'run' THEN distance_meters ELSE 0 END,
+        walk_active_seconds = CASE WHEN type = 'walk' THEN COALESCE(active_duration_seconds, 0) ELSE 0 END,
+        run_active_seconds = CASE WHEN type = 'run' THEN COALESCE(active_duration_seconds, 0) ELSE 0 END;
+      ALTER TABLE route_points ADD COLUMN activity_type TEXT;
+      ALTER TABLE tracking_state ADD COLUMN walk_distance_meters REAL NOT NULL DEFAULT 0;
+      ALTER TABLE tracking_state ADD COLUMN run_distance_meters REAL NOT NULL DEFAULT 0;
+      ALTER TABLE tracking_state ADD COLUMN run_active_ms REAL NOT NULL DEFAULT 0;
+      UPDATE tracking_state SET
+        walk_distance_meters = CASE WHEN (SELECT type FROM activities WHERE id = tracking_state.activity_id) = 'walk' THEN distance_meters ELSE 0 END,
+        run_distance_meters = CASE WHEN (SELECT type FROM activities WHERE id = tracking_state.activity_id) = 'run' THEN distance_meters ELSE 0 END,
+        run_active_ms = CASE WHEN (SELECT type FROM activities WHERE id = tracking_state.activity_id) = 'run' THEN active_duration_ms ELSE 0 END;
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

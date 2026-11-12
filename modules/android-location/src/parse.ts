@@ -1,6 +1,7 @@
 import type {
   ActivityType,
   DeviceLocationStatus,
+  IntervalPlan,
   JournalPoint,
   NativeSessionState,
   NativeTrackingStatus,
@@ -55,7 +56,16 @@ export function parseJournalPoint(value: unknown): JournalPoint | null {
   const activityId = finiteOrNull(value.activityId);
   const segmentIndex = finiteOrNull(value.segmentIndex);
   if (sequence === null || activityId === null || segmentIndex === null) return null;
-  return { ...location, sequence, activityId, segmentIndex };
+  return { ...location, sequence, activityId, segmentIndex, activityType: parseActivityType(value.activityType) };
+}
+
+function parseIntervals(bag: Bag): IntervalPlan | null {
+  const runMs = finiteOrNull(bag.intervalRunMs);
+  const walkMs = finiteOrNull(bag.intervalWalkMs);
+  const repeats = finiteOrNull(bag.intervalRepeats);
+  if (runMs === null || walkMs === null || repeats === null) return null;
+  if (runMs <= 0 || walkMs <= 0 || repeats <= 0) return null;
+  return { runSeconds: Math.round(runMs / 1000), walkSeconds: Math.round(walkMs / 1000), repeats: Math.round(repeats) };
 }
 
 export function parseStatus(value: unknown): NativeTrackingStatus {
@@ -71,6 +81,10 @@ export function parseStatus(value: unknown): NativeTrackingStatus {
     state,
     elapsedMs: finiteOrNull(bag.elapsedMs),
     activeMs: finiteOrNull(bag.activeMs),
+    runActiveMs: finiteOrNull(bag.runActiveMs),
+    autoPaused: bag.autoPaused === true,
+    autoPauseEnabled: bag.autoPauseEnabled === true,
+    intervals: parseIntervals(bag),
     startedAtWallMs: finiteOrNull(bag.startedAtWallMs),
     finishedAtWallMs: finiteOrNull(bag.finishedAtWallMs),
     segmentIndex: finiteOrNull(bag.segmentIndex),

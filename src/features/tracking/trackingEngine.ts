@@ -2,6 +2,7 @@ import {
   parseJournalPoint,
   parseRawLocation,
   parseStatus,
+  type IntervalPlan,
   type JournalPoint,
   type NativeTrackingStatus,
   type RawLocation,
@@ -17,10 +18,11 @@ import {
   listUnfinishedActivities,
   updateActivityStatus,
   updateLiveProgress,
+  updateLiveType,
 } from '@/database/activityRepository';
 import { notifyDataChanged } from '@/database/dataEvents';
 import { listGoals } from '@/database/goalRepository';
-import { setPreference } from '@/database/preferencesRepository';
+import { getPreferences, setPreference } from '@/database/preferencesRepository';
 import { getRoutePoints, insertRoutePoints, type NewRoutePoint } from '@/database/routePointRepository';
 import {
   deleteTrackingState,
@@ -34,13 +36,13 @@ import { serializeWrite, writeTransaction } from '@/database/writeQueue';
 import { recomputeAchievements } from '@/features/achievements/achievementService';
 import type { AchievementType } from '@/features/achievements/achievements';
 import { appendVertex, buildRoutePreview, buildRouteGeometry, emptyGeometry, type RouteGeometry } from '@/features/activities/routeGeometry';
-import type { Activity, ActivityStatus, ActivityType } from '@/features/activities/types';
-import { goalInEffect } from '@/features/goals/goals';
-import { localDayKey } from '@/utils/dates';
+import { mainType, type Activity, type ActivityStatus, type ActivityType } from '@/features/activities/types';
+import { goalsReachedBy, type GoalPeriod } from '@/features/goals/goals';
 import { averagePaceSecondsPerKm, averageSpeedMps, currentSpeedMps, type PaceSample } from '@/utils/pace';
 
 import { processMeasurement, type FilterDecision, type Measurement } from './gpsFilter';
 import { summarizeQuality } from './gpsQuality';
+import { isValidPlan } from './intervals';
 import { filterConfigFor, TRACKING_CONFIG } from './trackingConfig';
 
 /**
@@ -51,6 +53,9 @@ import { filterConfigFor, TRACKING_CONFIG } from './trackingConfig';
  * in one transaction, and only then acknowledges the journal rows. A crash at any point either
  * leaves the rows in the journal (re-processed next time) or committed (skipped next time),
  * so every fix is processed exactly once.
+ *
+ * A workout can switch between walking and running (by hand, or with run/walk intervals): every
+ * fix carries the part it was recorded in, and distance and active time are kept per part.
  */
 
 export interface TrackingNativeApi {
@@ -59,6 +64,8 @@ export interface TrackingNativeApi {
   pauseTrackingAsync(): Promise<unknown>;
   resumeTrackingAsync(): Promise<unknown>;
   finishTrackingAsync(): Promise<unknown>;
+  switchActivityTypeAsync(activityType: ActivityType): Promise<unknown>;
+  setAutoPauseAsync(enabled: boolean): Promise<unknown>;
   discardTrackingAsync(): Promise<unknown>;
   clearSessionAsync(activityId: number): Promise<boolean>;
   readJournalAsync(activityId: number, afterSequence: number, limit: number): Promise<unknown[]>;
@@ -86,21 +93,41 @@ export type RecoveryInfo = {
 export type CompletedInfo = {
   activityId: number;
   unlockedAchievements: AchievementType[];
-  goalReached: boolean;
+  /** The goals (day, week, month) whose target this workout reached. */
+  goalsReached: GoalPeriod[];
+};
+
+export type StartOptions = {
+  /** Stop the active clock while standing still. */
+  autoPause?: boolean;
+  /** Run/walk intervals. The workout starts with a run phase. */
+  intervals?: IntervalPlan | null;
 };
 
 export type LiveSnapshot = {
   phase: EnginePhase;
   busy: boolean;
   activityId: number | null;
+  /** The current part: walking or running right now. */
   activityType: ActivityType | null;
   startedAt: number | null;
   distanceMeters: number;
+  walkDistanceMeters: number;
+  runDistanceMeters: number;
   /** Durations as of `durationsCapturedAt` (monotonic JS clock); extrapolate while ticking. */
   activeMs: number;
+  /** The part of activeMs spent running. */
+  runActiveMs: number;
   elapsedMs: number;
   durationsCapturedAt: number;
+  /** The active clock is running (recording and not auto-paused). */
   durationsTicking: boolean;
+  /** The elapsed clock is running (recording or paused). */
+  elapsedTicking: boolean;
+  /** Recording, but the active clock is stopped because the phone is standing still. */
+  autoPaused: boolean;
+  autoPauseEnabled: boolean;
+  intervals: IntervalPlan | null;
   lastFix: RawLocation | null;
   lastFixReceivedAt: number | null;
   signalLost: boolean;
@@ -148,10 +175,17 @@ function initialSnapshot(phase: EnginePhase): LiveSnapshot {
     activityType: null,
     startedAt: null,
     distanceMeters: 0,
+    walkDistanceMeters: 0,
+    runDistanceMeters: 0,
     activeMs: 0,
+    runActiveMs: 0,
     elapsedMs: 0,
     durationsCapturedAt: 0,
     durationsTicking: false,
+    elapsedTicking: false,
+    autoPaused: false,
+    autoPauseEnabled: false,
+    intervals: null,
     lastFix: null,
     lastFixReceivedAt: null,
     signalLost: false,
@@ -184,7 +218,13 @@ function toMeasurement(point: JournalPoint): Measurement {
   };
 }
 
-function toRouteRow(activityId: number, sequenceNumber: number, point: JournalPoint, decision: FilterDecision): NewRoutePoint {
+function toRouteRow(
+  activityId: number,
+  sequenceNumber: number,
+  point: JournalPoint,
+  activityType: ActivityType,
+  decision: FilterDecision,
+): NewRoutePoint {
   return {
     activityId,
     sequenceNumber,
@@ -202,6 +242,7 @@ function toRouteRow(activityId: number, sequenceNumber: number, point: JournalPo
     rejectionReason: decision.rejectionReason,
     startsNewLine: decision.startsNewLine,
     gapBeforeSeconds: decision.gapBeforeSeconds,
+    activityType,
   };
 }
 
@@ -210,6 +251,8 @@ const STATUS_FOR_NATIVE_STATE: Partial<Record<NativeTrackingStatus['state'], Act
   paused: 'paused',
   interrupted: 'recovering',
 };
+
+type AcceptedFix = { point: JournalPoint; activityType: ActivityType; decision: FilterDecision; cumulative: number };
 
 export class TrackingEngine {
   private snapshot: LiveSnapshot;
@@ -233,6 +276,7 @@ export class TrackingEngine {
   private latestFixTimeMs: number | null = null;
   private nativeState: NativeTrackingStatus['state'] = 'idle';
   private writtenStatus: { activityId: number; status: ActivityStatus } | null = null;
+  private writtenType: { activityId: number; type: ActivityType } | null = null;
 
   constructor(dependencies: EngineDependencies) {
     this.native = dependencies.native;
@@ -361,15 +405,21 @@ export class TrackingEngine {
       this.pushPaceSample(point.segmentIndex, point.elapsedRealtimeMs ?? point.recordedAt, cumulative);
     }
 
+    this.writtenType = { activityId: activity.id, type: activity.type };
     this.update({
       activityId: activity.id,
       activityType: activity.type,
       startedAt: activity.startedAt,
       distanceMeters: record.filterState.totalDistanceMeters,
+      walkDistanceMeters: record.walkDistanceMeters,
+      runDistanceMeters: record.runDistanceMeters,
       activeMs: record.activeDurationMs,
+      runActiveMs: record.runActiveMs,
       elapsedMs: record.elapsedDurationMs,
       durationsCapturedAt: this.monotonicNow(),
       durationsTicking: false,
+      elapsedTicking: false,
+      autoPaused: false,
       geometry,
       acceptedPoints: record.filterState.quality.accepted,
       rejectedPoints: record.filterState.quality.rejected,
@@ -399,42 +449,60 @@ export class TrackingEngine {
     void this.applyStatus(status).catch((error: unknown) => this.update({ error: errorMessage(error) }));
   }
 
-  /** Mirrors the native status into the snapshot and the activity's status column. */
+  /** Mirrors the native status into the snapshot and the activity's status and type columns. */
   private async applyStatus(status: NativeTrackingStatus) {
     this.nativeState = status.state;
+    const recording = status.state === 'recording';
+    const autoPaused = recording && status.autoPaused;
     const patch: Partial<LiveSnapshot> = {
       signalLost: status.signalLost,
       locationServicesEnabled: status.locationServicesEnabled,
       lowBattery: status.lowBattery,
       pendingJournalPoints: status.pendingJournalPoints ?? 0,
+      autoPaused,
+      autoPauseEnabled: status.autoPauseEnabled,
+      durationsTicking: recording && !autoPaused,
+      elapsedTicking: recording || status.state === 'paused',
     };
+    if (status.hasSession) {
+      patch.intervals = status.intervals;
+      if (status.activityType) patch.activityType = status.activityType;
+    }
     if (status.activeMs !== null) {
       patch.activeMs = status.activeMs;
+      patch.runActiveMs = Math.min(status.activeMs, status.runActiveMs ?? this.snapshot.runActiveMs);
       patch.elapsedMs = status.elapsedMs ?? this.snapshot.elapsedMs;
       patch.durationsCapturedAt = this.monotonicNow();
     }
-    patch.durationsTicking = status.state === 'recording';
     if (status.error) patch.error = status.error;
 
     if (!this.snapshot.busy || status.state === 'interrupted') {
-      if (status.state === 'recording') patch.phase = 'recording';
+      if (recording) patch.phase = 'recording';
       else if (status.state === 'paused') patch.phase = 'paused';
       else if (status.state === 'interrupted') {
         patch.phase = 'recovering';
         patch.recovery = { reason: status.interruptionReason, canResume: true };
       }
     }
-    if (status.state === 'recording' || status.state === 'paused') patch.recovery = null;
+    if (recording || status.state === 'paused') patch.recovery = null;
     this.update(patch);
 
     const activityId = this.snapshot.activityId;
+    if (activityId === null) return;
     const target = STATUS_FOR_NATIVE_STATE[status.state];
     const written = this.writtenStatus;
-    if (activityId !== null && target && (written?.activityId !== activityId || written.status !== target)) {
-      const db = await this.getDb();
-      await writeTransaction(db, () => updateActivityStatus(db, activityId, target));
-      this.writtenStatus = { activityId, status: target };
-    }
+    const statusChanged = target !== undefined && (written?.activityId !== activityId || written.status !== target);
+    // The row keeps the current part until the workout is saved with its main type.
+    const type = status.hasSession ? this.snapshot.activityType : null;
+    const typeChanged = type !== null && (this.writtenType?.activityId !== activityId || this.writtenType.type !== type);
+    if (!statusChanged && !typeChanged) return;
+    const db = await this.getDb();
+    await writeTransaction(db, async () => {
+      if (statusChanged && target) await updateActivityStatus(db, activityId, target);
+      if (typeChanged && type) await updateLiveType(db, activityId, type);
+    });
+    if (statusChanged && target) this.writtenStatus = { activityId, status: target };
+    if (typeChanged && type) this.writtenType = { activityId, type };
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -488,22 +556,24 @@ export class TrackingEngine {
   private async drainJournal() {
     const native = this.native;
     const activityId = this.snapshot.activityId;
-    const activityType = this.snapshot.activityType ?? 'walk';
     if (!native || activityId === null) return;
+    // Fixes from before walk/run parts existed carry no part; they belong to the workout's type.
+    const fallbackType = this.snapshot.activityType ?? 'walk';
     const db = await this.getDb();
     let record: TrackingStateRecord = (await getTrackingState(db, activityId)) ?? newTrackingState(activityId);
-    const config = filterConfigFor(activityType);
 
     for (let batch = 0; batch < MAX_BATCHES_PER_SYNC; batch += 1) {
       const raw = await native.readJournalAsync(activityId, record.lastJournalSequence, JOURNAL_BATCH_SIZE);
       if (!Array.isArray(raw) || raw.length === 0) break;
 
       let filterState = record.filterState;
+      let walkDistance = record.walkDistanceMeters;
+      let runDistance = record.runDistanceMeters;
       let sequenceNumber = record.nextSequenceNumber;
       let lastJournalSequence = record.lastJournalSequence;
       let lastAcceptedSequenceNumber = record.lastAcceptedSequenceNumber;
       const rows: NewRoutePoint[] = [];
-      const accepted: { point: JournalPoint; decision: FilterDecision; cumulative: number }[] = [];
+      const accepted: AcceptedFix[] = [];
 
       for (const entry of raw) {
         const sequence = (entry as { sequence?: unknown } | null)?.sequence;
@@ -512,12 +582,18 @@ export class TrackingEngine {
         }
         const point = parseJournalPoint(entry);
         if (!point || point.activityId !== activityId || point.sequence <= record.lastJournalSequence) continue;
-        const result = processMeasurement(filterState, toMeasurement(point), config);
+        const activityType = point.activityType ?? fallbackType;
+        const before = filterState.totalDistanceMeters;
+        const result = processMeasurement(filterState, toMeasurement(point), filterConfigFor(activityType));
         filterState = result.state;
-        rows.push(toRouteRow(activityId, sequenceNumber, point, result.decision));
+        // Distance counts for the part the fix that completed it was recorded in.
+        const added = Math.max(0, filterState.totalDistanceMeters - before);
+        if (activityType === 'run') runDistance += added;
+        else walkDistance += added;
+        rows.push(toRouteRow(activityId, sequenceNumber, point, activityType, result.decision));
         if (result.decision.accepted) {
           lastAcceptedSequenceNumber = sequenceNumber;
-          accepted.push({ point, decision: result.decision, cumulative: filterState.totalDistanceMeters });
+          accepted.push({ point, activityType, decision: result.decision, cumulative: filterState.totalDistanceMeters });
         }
         sequenceNumber += 1;
       }
@@ -529,7 +605,10 @@ export class TrackingEngine {
         nextSequenceNumber: sequenceNumber,
         lastAcceptedSequenceNumber,
         distanceMeters: filterState.totalDistanceMeters,
+        walkDistanceMeters: walkDistance,
+        runDistanceMeters: runDistance,
         activeDurationMs: this.currentActiveMs(),
+        runActiveMs: this.currentRunActiveMs(),
         elapsedDurationMs: this.currentElapsedMs(),
         filterState,
         updatedAt: this.now(),
@@ -539,6 +618,8 @@ export class TrackingEngine {
         await saveTrackingState(db, nextRecord);
         await updateLiveProgress(db, activityId, {
           distanceMeters: nextRecord.distanceMeters,
+          walkDistanceMeters: nextRecord.walkDistanceMeters,
+          runDistanceMeters: nextRecord.runDistanceMeters,
           elapsedSeconds: nextRecord.elapsedDurationMs / 1000,
           activeSeconds: nextRecord.activeDurationMs / 1000,
         });
@@ -547,7 +628,7 @@ export class TrackingEngine {
       // Only after the commit may the native side forget these fixes.
       await native.acknowledgeJournalAsync(activityId, lastJournalSequence);
 
-      this.applyAccepted(accepted, filterState.totalDistanceMeters, filterState.quality.accepted, filterState.quality.rejected);
+      this.applyAccepted(accepted, record);
       if (raw.length < JOURNAL_BATCH_SIZE) break;
     }
 
@@ -558,27 +639,25 @@ export class TrackingEngine {
     }
   }
 
-  private applyAccepted(
-    accepted: { point: JournalPoint; decision: FilterDecision; cumulative: number }[],
-    distanceMeters: number,
-    acceptedCount: number,
-    rejectedCount: number,
-  ) {
+  private applyAccepted(accepted: AcceptedFix[], record: TrackingStateRecord) {
     let geometry = this.snapshot.geometry;
-    for (const { point, decision, cumulative } of accepted) {
+    for (const { point, activityType, decision, cumulative } of accepted) {
       geometry = appendVertex(geometry, {
         latitude: point.latitude,
         longitude: point.longitude,
         startsNewLine: decision.startsNewLine,
         gapBeforeSeconds: decision.gapBeforeSeconds,
+        activityType,
       });
       this.pushPaceSample(point.segmentIndex, point.elapsedRealtimeMs ?? point.wallTimeMs, cumulative);
     }
     this.update({
       geometry,
-      distanceMeters,
-      acceptedPoints: acceptedCount,
-      rejectedPoints: rejectedCount,
+      distanceMeters: record.filterState.totalDistanceMeters,
+      walkDistanceMeters: record.walkDistanceMeters,
+      runDistanceMeters: record.runDistanceMeters,
+      acceptedPoints: record.filterState.quality.accepted,
+      rejectedPoints: record.filterState.quality.rejected,
       currentSpeedMps: currentSpeedMps(this.paceSamples, this.latestFixTimeMs, TRACKING_CONFIG.currentPaceWindowSeconds),
     });
   }
@@ -600,14 +679,23 @@ export class TrackingEngine {
     return currentSpeedMps(this.paceSamples, this.latestFixTimeMs, TRACKING_CONFIG.currentPaceWindowSeconds);
   }
 
+  private sinceCapture() {
+    return Math.max(0, this.monotonicNow() - this.snapshot.durationsCapturedAt);
+  }
+
   private currentActiveMs() {
     const s = this.snapshot;
-    return s.activeMs + (s.durationsTicking ? Math.max(0, this.monotonicNow() - s.durationsCapturedAt) : 0);
+    return s.activeMs + (s.durationsTicking ? this.sinceCapture() : 0);
+  }
+
+  private currentRunActiveMs() {
+    const s = this.snapshot;
+    return s.runActiveMs + (s.durationsTicking && s.activityType === 'run' ? this.sinceCapture() : 0);
   }
 
   private currentElapsedMs() {
     const s = this.snapshot;
-    return s.elapsedMs + (s.durationsTicking ? Math.max(0, this.monotonicNow() - s.durationsCapturedAt) : 0);
+    return s.elapsedMs + (s.elapsedTicking ? this.sinceCapture() : 0);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -637,7 +725,7 @@ export class TrackingEngine {
     await this.applyStatus(parseStatus(await this.native.getStatusAsync()));
   }
 
-  start(activityType: ActivityType): Promise<number> {
+  start(activityType: ActivityType, options: StartOptions = {}): Promise<number> {
     return this.exclusive(async () => {
       const native = this.requireNative();
       await this.initialize();
@@ -653,29 +741,39 @@ export class TrackingEngine {
         throw new EngineError('ERR_UNFINISHED', 'Save or discard the interrupted workout first.');
       }
 
+      const intervals = isValidPlan(options.intervals) ? options.intervals : null;
+      const autoPause = options.autoPause === true;
+      // Intervals start with a run (the native service does the same).
+      const firstType: ActivityType = intervals ? 'run' : activityType;
+
       this.update({ ...initialSnapshot('starting'), busy: true });
       const startedAt = this.now();
       let activityId = 0;
       await writeTransaction(db, async () => {
-        activityId = await createActivity(db, { type: activityType, startedAt });
+        activityId = await createActivity(db, { type: firstType, startedAt });
         await saveTrackingState(db, newTrackingState(activityId));
       });
+      this.writtenType = { activityId, type: firstType };
 
       try {
         const started = parseStatus(
           await native.startTrackingAsync({
             activityId,
-            activityType,
+            activityType: firstType,
             intervalMs: TRACKING_CONFIG.desiredIntervalMs,
             openUri: this.deepLinks?.openUri,
             finishUri: this.deepLinks?.finishUri,
+            autoPause,
+            ...(intervals
+              ? { intervalRunSeconds: intervals.runSeconds, intervalWalkSeconds: intervals.walkSeconds, intervalRepeats: intervals.repeats }
+              : {}),
           }),
         );
         this.paceSamples = [];
         this.paceSegment = null;
         this.latestFixTimeMs = null;
         this.lastNotifiedDistance = -Infinity;
-        this.update({ activityId, activityType, startedAt, phase: 'recording' });
+        this.update({ activityId, activityType: firstType, startedAt, phase: 'recording', autoPauseEnabled: autoPause, intervals });
         await this.applyStatus(started);
         await serializeWrite(() => setPreference(db, 'lastActivityType', activityType));
         notifyDataChanged();
@@ -717,6 +815,33 @@ export class TrackingEngine {
     });
   }
 
+  /**
+   * Switches the workout between walking and running. From now on, fixes and active time count
+   * for the new part. During intervals the next phase change switches it again.
+   */
+  switchType(activityType: ActivityType): Promise<void> {
+    return this.exclusive(async () => {
+      const native = this.requireNative();
+      const { activityId, phase } = this.snapshot;
+      if (activityId === null || (phase !== 'recording' && phase !== 'paused')) {
+        throw new EngineError('ERR_NO_ACTIVITY', 'Start a workout first.');
+      }
+      if (this.snapshot.activityType === activityType) return;
+      const status = parseStatus(await native.switchActivityTypeAsync(activityType));
+      await this.applyStatus(status);
+    });
+  }
+
+  /** Turns auto-pause on or off for the workout in progress. */
+  setAutoPause(enabled: boolean): Promise<void> {
+    return this.exclusive(async () => {
+      const native = this.requireNative();
+      if (this.snapshot.activityId === null || this.snapshot.phase === 'recovering') return;
+      const status = parseStatus(await native.setAutoPauseAsync(enabled));
+      await this.applyStatus(status);
+    });
+  }
+
   finish(): Promise<CompletedInfo> {
     return this.exclusive(async () => {
       const activityId = this.snapshot.activityId;
@@ -733,15 +858,20 @@ export class TrackingEngine {
 
   /** Drains the journal and writes the final activity. Safe to repeat after a crash. */
   private async completeFinish(db: SqlDatabase, activityId: number, status: NativeTrackingStatus | null): Promise<CompletedInfo> {
-    this.update({ phase: 'finishing', durationsTicking: false });
+    this.update({ phase: 'finishing', durationsTicking: false, elapsedTicking: false });
     await this.syncNow();
 
     const activity = await getActivity(db, activityId);
     if (!activity) throw new EngineError('ERR_NO_ACTIVITY', 'The workout could not be found.');
     const record = (await getTrackingState(db, activityId)) ?? newTrackingState(activityId);
-    const activeMs = status?.activeMs ?? record.activeDurationMs;
+    const activeMs = Math.max(0, status?.activeMs ?? record.activeDurationMs);
+    const runActiveMs = Math.min(activeMs, Math.max(0, status?.runActiveMs ?? record.runActiveMs));
     const elapsedMs = Math.max(status?.elapsedMs ?? record.elapsedDurationMs, activeMs);
     const distance = record.filterState.totalDistanceMeters;
+    // The parts always add up to the total.
+    const runDistance = Math.min(distance, Math.max(0, record.runDistanceMeters));
+    const walkDistance = Math.max(0, distance - runDistance);
+    const type = mainType(walkDistance, runDistance, activity.type);
     const accepted = await getRoutePoints(db, activityId, { acceptedOnly: true });
     const endedAt = status?.finishedAtWallMs ?? activity.startedAt + elapsedMs;
 
@@ -749,10 +879,15 @@ export class TrackingEngine {
     let unlocked: AchievementType[] = [];
     await writeTransaction(db, async () => {
       await completeActivity(db, activityId, {
+        type,
         endedAt,
         elapsedDurationSeconds: elapsedMs / 1000,
         activeDurationSeconds: activeMs / 1000,
         distanceMeters: distance,
+        walkDistanceMeters: walkDistance,
+        runDistanceMeters: runDistance,
+        walkActiveSeconds: (activeMs - runActiveMs) / 1000,
+        runActiveSeconds: runActiveMs / 1000,
         averagePaceSecondsPerKm: averagePaceSecondsPerKm(activeMs / 1000, distance),
         averageSpeedMps: averageSpeedMps(distance, activeMs / 1000),
         gpsQualitySummary: summarizeQuality(record.filterState.quality),
@@ -765,10 +900,11 @@ export class TrackingEngine {
     if (this.native) {
       await this.native.clearSessionAsync(activityId).catch(() => undefined);
     }
-    const goals = await listGoals(db);
-    const goalReached = didReachDailyGoal(before, goals, activity.startedAt, distance);
-    const completed: CompletedInfo = { activityId, unlockedAchievements: unlocked, goalReached };
+    const [goals, preferences] = await Promise.all([listGoals(db), getPreferences(db)]);
+    const goalsReached = goalsReachedBy(before, goals, { startedAt: activity.startedAt, distanceMeters: distance }, preferences.weekStartsOn);
+    const completed: CompletedInfo = { activityId, unlockedAchievements: unlocked, goalsReached };
     this.nativeState = 'idle';
+    this.writtenType = null;
     this.update({ ...initialSnapshot('idle'), lastCompleted: completed });
     notifyDataChanged();
     await this.reconcileRemaining();
@@ -792,6 +928,7 @@ export class TrackingEngine {
         await writeTransaction(db, () => deleteActivity(db, activityId));
       }
       this.nativeState = 'idle';
+      this.writtenType = null;
       this.update(initialSnapshot('idle'));
       notifyDataChanged();
       await this.reconcileRemaining();
@@ -802,20 +939,3 @@ export class TrackingEngine {
     if (this.snapshot.lastCompleted) this.update({ lastCompleted: null });
   }
 }
-
-/** True when the just-finished activity took that day's total across the goal in effect. */
-function didReachDailyGoal(
-  completedBefore: { startedAt: number; distanceMeters: number; status: string }[],
-  goals: Awaited<ReturnType<typeof listGoals>>,
-  startedAt: number,
-  distanceMeters: number,
-): boolean {
-  const day = localDayKey(startedAt);
-  const goal = goalInEffect(goals, day);
-  if (!goal) return false;
-  const before = completedBefore
-    .filter((activity) => activity.status === 'completed' && localDayKey(activity.startedAt) === day)
-    .reduce((sum, activity) => sum + activity.distanceMeters, 0);
-  return before < goal.targetDistanceMeters && before + distanceMeters >= goal.targetDistanceMeters;
-}
-

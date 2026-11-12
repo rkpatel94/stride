@@ -1,5 +1,5 @@
 import { buildReplayTimeline, frameAt, type ReplayInputPoint } from '@/features/activities/replay';
-import { appendVertex, buildRouteGeometry, buildRoutePreview, emptyGeometry } from '@/features/activities/routeGeometry';
+import { appendVertex, buildRouteGeometry, buildRoutePreview, emptyGeometry, hasBothParts } from '@/features/activities/routeGeometry';
 import { destinationPoint, type LatLng } from '@/utils/geo';
 
 const origin: LatLng = { latitude: 48.2082, longitude: 16.3738 };
@@ -36,6 +36,26 @@ describe('route geometry', () => {
   it('builds the same geometry incrementally (live) as in one pass (saved)', () => {
     const incremental = vertices.reduce(appendVertex, emptyGeometry());
     expect(incremental).toEqual(buildRouteGeometry(vertices));
+  });
+
+  it('starts a new line, joined to the last one, where the workout switches between walking and running', () => {
+    const at = (meters: number, activityType: 'walk' | 'run' | null, startsNewLine = false) => ({
+      ...destinationPoint(origin, meters, 90),
+      startsNewLine,
+      gapBeforeSeconds: null,
+      activityType,
+    });
+    const mixed = [at(0, 'walk', true), at(10, 'walk'), at(20, 'run'), at(30, 'run'), at(40, null), at(50, 'walk')];
+    const geometry = buildRouteGeometry(mixed);
+    expect(geometry.lineTypes).toEqual(['walk', 'run', 'walk']);
+    expect(geometry.lines.map((line) => line.length)).toEqual([2, 4, 2]);
+    expect(geometry.lines[1][0]).toEqual(geometry.lines[0][1]);
+    expect(geometry.gapConnectors).toHaveLength(0);
+    expect(hasBothParts(geometry)).toBe(true);
+    expect(mixed.reduce(appendVertex, emptyGeometry())).toEqual(geometry);
+    // Points without a part (recorded before parts existed) never split a line.
+    expect(hasBothParts(buildRouteGeometry(vertices))).toBe(false);
+    expect(buildRouteGeometry(vertices).lineTypes).toEqual([null, null, null]);
   });
 
   it('simplifies a preview to at most the requested number of points, keeping the ends', () => {

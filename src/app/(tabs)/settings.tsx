@@ -110,9 +110,9 @@ export default function SettingsScreen() {
       <Card onPress={() => router.push('/goals')} accessibilityLabel="Goals and achievements" style={styles.linkCard}>
         <Icon name="target" size={24} color={theme.accent} />
         <View style={styles.flex}>
-          <AppText weight="600">Daily goal & achievements</AppText>
+          <AppText weight="600">Goals & achievements</AppText>
           <AppText variant="caption" color="textSecondary">
-            Set your daily distance target and see milestones.
+            Daily, weekly and monthly distance targets, and milestones.
           </AppText>
         </View>
         <Icon name="chevron-right" size={24} color={theme.textMuted} />
@@ -120,6 +120,21 @@ export default function SettingsScreen() {
 
       <SectionHeader title="Tracking" />
       <Card>
+        <View style={styles.row}>
+          <View style={styles.flex}>
+            <AppText weight="600">Auto-pause</AppText>
+            <AppText variant="caption" color="textSecondary">
+              Stops the active time while you stand still, e.g. at traffic lights. The route keeps recording.
+            </AppText>
+          </View>
+          <Switch
+            value={preferences?.autoPause ?? false}
+            onValueChange={(value) => void update('autoPause', value)}
+            accessibilityLabel="Auto-pause"
+            trackColor={{ true: theme.primary, false: theme.border }}
+            thumbColor={preferences?.autoPause ? theme.onPrimary : theme.textMuted}
+          />
+        </View>
         <View style={styles.row}>
           <View style={styles.flex}>
             <AppText weight="600">Keep screen on while tracking</AppText>
