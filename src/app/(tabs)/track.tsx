@@ -35,6 +35,7 @@ import {
 } from '@/features/tracking/permissions';
 import { TRACKING_CONFIG } from '@/features/tracking/trackingConfig';
 import { useTheme } from '@/hooks/use-theme';
+import { useRouteRequest } from '@/hooks/useRouteRequest';
 import { liveDurations, useLocationPreview, useTicker, useTrackingSnapshot } from '@/hooks/useTracking';
 import { formatAccuracy, formatDistance, formatDuration, formatKilometers, formatPace, formatSpeed } from '@/utils/format';
 import { averagePaceSecondsPerKm, averageSpeedMps, paceFromSpeed } from '@/utils/pace';
@@ -55,7 +56,9 @@ export default function TrackScreen() {
   const [device, setDevice] = useState<DeviceLocationStatus | null>(null);
   const [preparing, setPreparing] = useState<Preparing | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const handledParams = useRef<{ start?: string; confirmFinish?: string }>({});
+  // Set while the activity type came from a start request (Home's buttons), so loading the
+  // last-used type when the screen gains focus doesn't overwrite it. Cleared on blur.
+  const typeFromRequest = useRef(false);
 
   const idle = snapshot.phase === 'idle';
   const sessionActive = snapshot.activityId !== null;
@@ -75,9 +78,12 @@ export default function TrackScreen() {
         .then(getPreferences)
         .then((loaded) => {
           setPreferences(loaded);
-          if (!sessionActive) setActivityType((current) => (handledParams.current.start ? current : loaded.lastActivityType));
+          if (!sessionActive && !typeFromRequest.current) setActivityType(loaded.lastActivityType);
         });
       void trackingEngine.refreshStatus().catch(() => undefined);
+      return () => {
+        typeFromRequest.current = false;
+      };
     }, [refreshDevice, sessionActive]),
   );
 
@@ -170,15 +176,13 @@ export default function TrackScreen() {
   }, [preparing, previewFix, beginRecording]);
 
   // Deep links: Home's start buttons and the notification's Finish action.
-  useEffect(() => {
-    if (params.start && params.start !== handledParams.current.start && (params.start === 'walk' || params.start === 'run')) {
-      const type = params.start;
-      handledParams.current.start = type;
-      router.setParams({ start: undefined });
-      // Run outside the effect body: the start flow updates screen state as it progresses.
-      if (idle) queueMicrotask(() => void startFlow(type));
-    }
-  }, [params.start, idle, startFlow]);
+  useRouteRequest(params.start, (type) => {
+    router.setParams({ start: undefined });
+    if (type !== 'walk' && type !== 'run') return;
+    typeFromRequest.current = true;
+    // Run outside the effect body: the start flow updates screen state as it progresses.
+    if (idle) queueMicrotask(() => void startFlow(type));
+  });
 
   const finish = useCallback(async () => {
     const { activeSeconds } = liveDurations(trackingEngine.getSnapshot(), monotonicNow());
@@ -215,13 +219,10 @@ export default function TrackScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    if (params.confirmFinish && params.confirmFinish !== handledParams.current.confirmFinish) {
-      handledParams.current.confirmFinish = params.confirmFinish;
-      router.setParams({ confirmFinish: undefined });
-      if (snapshot.activityId !== null && snapshot.phase !== 'finishing') queueMicrotask(() => void finish());
-    }
-  }, [params.confirmFinish, snapshot.activityId, snapshot.phase, finish]);
+  useRouteRequest(params.confirmFinish, () => {
+    router.setParams({ confirmFinish: undefined });
+    if (snapshot.activityId !== null && snapshot.phase !== 'finishing') queueMicrotask(() => void finish());
+  });
 
   const run = (action: () => Promise<unknown>, title: string) => () => {
     action().catch((error: unknown) => showError(title, error));

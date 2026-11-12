@@ -219,6 +219,35 @@ describe('journal processing and recovery', () => {
     expect(saved?.distanceMeters).toBeGreaterThan(240);
   });
 
+  it('keeps recording after resuming a workout that a reboot interrupted', async () => {
+    const first = newEngine();
+    await first.initialize();
+    const activityId = await first.start('walk');
+    const before = routeTrace([{ bearing: 90, meters: 250 }], 1.4, { seed: 8 });
+    feed(before.fixes);
+    await first.syncNow();
+    native.interrupt('device_rebooted');
+    first.dispose();
+
+    const second = newEngine();
+    await second.initialize();
+    expect(second.getSnapshot().recovery).toEqual({ reason: 'device_rebooted', canResume: true });
+    await second.resume();
+    // After the reboot the monotonic clock starts again near zero.
+    const after = routeTrace([{ bearing: 0, meters: 250 }], 1.4, {
+      seed: 9,
+      start: destinationPoint(before.end, 40, 0),
+      startSecond: before.endSecond + 900,
+    }).fixes.map((measurement, index) => ({ ...measurement, elapsedRealtimeMs: 45_000 + index * 1000 }));
+    feed(after);
+    await second.finish();
+
+    const saved = await getActivity(db, activityId);
+    expect(saved?.distanceMeters).toBeGreaterThan(480);
+    expect(saved?.distanceMeters).toBeLessThan(520);
+    expect(saved?.gpsQualitySummary?.rejectionCounts.out_of_order ?? 0).toBe(0);
+  });
+
   it('finishes saving automatically if the app died right after the user pressed Finish', async () => {
     const first = newEngine();
     await first.initialize();

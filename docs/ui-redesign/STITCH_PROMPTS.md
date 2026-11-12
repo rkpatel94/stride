@@ -303,7 +303,7 @@ Prototype flows to link:
 - **Glowing routes.** In MapLibre, draw a wide, low-opacity halo line under the 6 dp route line. A pace gradient needs `line-gradient` with line metrics on the GeoJSON source. Dotted gap lines already exist. For exact map colours, use a custom monochrome style JSON instead of OpenFreeMap's stock "dark".
 - **Swipe to delete in History** needs a gesture library. `react-native-gesture-handler`'s native build is currently excluded (the Windows path-length workaround in `react-native.config.js`). Until that's revisited, keep long-press and show a context menu.
 - **Hold-to-finish** replaces the Finish dialog. The notification's Finish action should still open the app on the finish sheet, so a pocket tap can't end a workout.
-- **Charts and graphics.** `react-native-gifted-charts` (already installed) does stacked bars and gradient area charts. Rings, stickers and the holographic foil can use `react-native-svg` and `expo-linear-gradient` (both installed).
+- **Charts and graphics.** Stacked bars are drawn by the app's own `DistanceBarChart` with `react-native-svg` (no chart library, to keep the APK small). Rings, stickers and the holographic foil can use `react-native-svg` and `expo-linear-gradient` (both installed).
 - **Keep:** the GPS honesty, the privacy copy, 48 / 64 dp touch targets and the accessibility labels.
 
 This prompting approach is based on three sources:

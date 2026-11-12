@@ -83,22 +83,13 @@ export async function getTrackingState(db: SqlDatabase, activityId: number): Pro
   return row ? mapRow(row) : null;
 }
 
+/** One row per activity, replaced as a whole (nothing references it, so REPLACE is safe). */
 export async function saveTrackingState(db: SqlDatabase, record: TrackingStateRecord): Promise<void> {
   await db.runAsync(
-    `INSERT INTO tracking_state (activity_id, state, last_journal_sequence, next_sequence_number, last_accepted_sequence_number,
-       distance_meters, active_duration_ms, elapsed_duration_ms, filter_state, recovery_json, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (activity_id) DO UPDATE SET
-       state = excluded.state,
-       last_journal_sequence = excluded.last_journal_sequence,
-       next_sequence_number = excluded.next_sequence_number,
-       last_accepted_sequence_number = excluded.last_accepted_sequence_number,
-       distance_meters = excluded.distance_meters,
-       active_duration_ms = excluded.active_duration_ms,
-       elapsed_duration_ms = excluded.elapsed_duration_ms,
-       filter_state = excluded.filter_state,
-       recovery_json = excluded.recovery_json,
-       updated_at = excluded.updated_at`,
+    `INSERT OR REPLACE INTO tracking_state (activity_id, state, last_journal_sequence, next_sequence_number,
+       last_accepted_sequence_number, distance_meters, active_duration_ms, elapsed_duration_ms, filter_state,
+       recovery_json, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       record.activityId,
       record.state,

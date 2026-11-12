@@ -46,8 +46,5 @@ export async function setPreference<K extends keyof Preferences>(
   key: K,
   value: Preferences[K],
 ): Promise<void> {
-  await db.runAsync(
-    'INSERT INTO preferences (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
-    [key, JSON.stringify(value)],
-  );
+  await db.runAsync('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)', [key, JSON.stringify(value)]);
 }

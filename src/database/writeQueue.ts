@@ -1,9 +1,9 @@
 import type { SqlDatabase } from './types';
 
 /**
- * expo-sqlite's withTransactionAsync is not exclusive: any other async query issued while it
- * is open runs inside that transaction. All writes therefore go through this queue, which runs
- * them strictly one after another.
+ * withTransactionAsync is not exclusive: the database has one connection, so any other async
+ * query issued while a transaction is open runs inside it. All writes therefore go through this
+ * queue, which runs them strictly one after another.
  */
 let tail: Promise<unknown> = Promise.resolve();
 

@@ -13,8 +13,8 @@ import android.os.Build
  * and then acknowledges (deletes) the rows it has committed. Because nothing depends on the JS
  * runtime being alive, fixes recorded while the UI is gone are never lost.
  *
- * This is a separate database file on purpose: the app database is owned by expo-sqlite, which
- * bundles its own SQLite library, and two SQLite libraries must never open the same file.
+ * This is a separate database file on purpose: the service writes it on its own thread without
+ * waiting for the app database, which the JS side opens, migrates and writes in transactions.
  */
 class TrackingJournal private constructor(context: Context) :
   SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {

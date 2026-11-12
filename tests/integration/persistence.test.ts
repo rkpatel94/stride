@@ -187,6 +187,21 @@ describe('goals and preferences', () => {
     ]);
   });
 
+  it('overwrites a saved preference and a saved tracking state instead of adding rows', async () => {
+    await setPreference(db, 'weekStartsOn', 0);
+    await setPreference(db, 'weekStartsOn', 3);
+    expect((await getPreferences(db)).weekStartsOn).toBe(3);
+    expect(await db.getAllAsync("SELECT value FROM preferences WHERE key = 'weekStartsOn'", [])).toEqual([{ value: '3' }]);
+
+    const activityId = await createActivity(db, { type: 'walk', startedAt: Date.now() });
+    await saveTrackingState(db, { ...newTrackingState(activityId), lastJournalSequence: 10, distanceMeters: 100 });
+    await saveTrackingState(db, { ...newTrackingState(activityId), lastJournalSequence: 25, distanceMeters: 240 });
+    const saved = await getTrackingState(db, activityId);
+    expect(saved?.lastJournalSequence).toBe(25);
+    expect(saved?.distanceMeters).toBe(240);
+    expect(await db.getAllAsync('SELECT activity_id FROM tracking_state', [])).toHaveLength(1);
+  });
+
   it('stores preferences and falls back to defaults for corrupt values', async () => {
     await setPreference(db, 'weekStartsOn', 0);
     await db.runAsync("INSERT INTO preferences (key, value) VALUES ('keepScreenOnWhileTracking', '{broken')", []);

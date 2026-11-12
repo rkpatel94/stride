@@ -215,16 +215,28 @@ export function processMeasurement(
   // 2. Coordinates.
   if (!isValidCoordinate(measurement)) return reject('invalid_coordinates');
 
-  // 3. Ordering. Monotonic time is used whenever the provider supplies it.
+  // 3. A new recording segment (after pause/resume or recovery) never joins the previous one.
+  //    It also restarts the ordering check: the monotonic clock restarts at zero when the phone
+  //    reboots, and recovery after a reboot always begins a new segment.
+  if (state.segmentIndex !== measurement.segmentIndex) {
+    next.segmentIndex = measurement.segmentIndex;
+    next.lastTimeMs = null;
+    next.anchor = null;
+    next.pendingMovementFixes = 0;
+    next.jumpCandidates = [];
+    next.lastUsableTimeMs = null;
+  }
+
+  // 4. Ordering within the segment. Monotonic time is used whenever the provider supplies it.
   const timeMs = timeOf(measurement);
   if (!Number.isFinite(timeMs) || timeMs <= 0) return reject('invalid_timestamp');
-  if (state.lastTimeMs !== null) {
-    if (timeMs === state.lastTimeMs) return reject('duplicate');
-    if (timeMs < state.lastTimeMs) return reject('out_of_order');
+  if (next.lastTimeMs !== null) {
+    if (timeMs === next.lastTimeMs) return reject('duplicate');
+    if (timeMs < next.lastTimeMs) return reject('out_of_order');
   }
   next.lastTimeMs = timeMs;
 
-  // 4. Accuracy.
+  // 5. Accuracy.
   const accuracy = measurement.accuracyMeters;
   quality.accuracyBuckets[bucketFor(accuracy)] += 1;
   if (accuracy === null || !Number.isFinite(accuracy) || accuracy > config.poorAccuracyMeters) {
@@ -237,15 +249,6 @@ export function processMeasurement(
     timeMs,
     accuracyMeters: accuracy,
   };
-
-  // 5. A new recording segment (after pause/resume or recovery) never joins the previous one.
-  if (state.segmentIndex !== measurement.segmentIndex) {
-    next.segmentIndex = measurement.segmentIndex;
-    next.anchor = null;
-    next.pendingMovementFixes = 0;
-    next.jumpCandidates = [];
-    next.lastUsableTimeMs = null;
-  }
 
   const gapSeconds = next.lastUsableTimeMs !== null ? (timeMs - next.lastUsableTimeMs) / 1000 : 0;
   next.lastUsableTimeMs = timeMs;

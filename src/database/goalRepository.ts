@@ -29,20 +29,22 @@ export async function listGoals(db: SqlDatabase): Promise<Goal[]> {
 
 /**
  * Writes the goal that applies from `startDate` onward (one row per period and start day, so
- * changing the goal several times in a day just updates that day's row).
+ * changing the goal several times in a day just updates that day's row). Update-then-insert
+ * instead of UPSERT, which Android 7–10's SQLite lacks; callers serialise writes.
  */
 export async function upsertGoal(
   db: SqlDatabase,
   input: { periodType: GoalPeriod; targetDistanceMeters: number; startDate: string; enabled: boolean },
 ): Promise<void> {
   const now = Date.now();
+  const updated = await db.runAsync(
+    'UPDATE goals SET target_distance_meters = ?, enabled = ?, updated_at = ? WHERE period_type = ? AND start_date = ?',
+    [input.targetDistanceMeters, input.enabled ? 1 : 0, now, input.periodType, input.startDate],
+  );
+  if (updated.changes > 0) return;
   await db.runAsync(
     `INSERT INTO goals (period_type, target_distance_meters, start_date, enabled, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT (period_type, start_date) DO UPDATE SET
-       target_distance_meters = excluded.target_distance_meters,
-       enabled = excluded.enabled,
-       updated_at = excluded.updated_at`,
+     VALUES (?, ?, ?, ?, ?, ?)`,
     [input.periodType, input.targetDistanceMeters, input.startDate, input.enabled ? 1 : 0, now, now],
   );
 }

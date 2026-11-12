@@ -8,10 +8,12 @@ subscription or API key.
 - **Platform:** Android (minSdk 24, targetSdk 36), React Native 0.88 / Expo SDK 58, TypeScript.
 - **Recording:** a Kotlin foreground service (type `location`) using the Fused Location Provider
   (raw GNSS fallback without Google Play services). Recording keeps going with the screen locked.
-- **Storage:** SQLite (`expo-sqlite`) with versioned migrations, plus a small native journal so
+- **Storage:** Android's built-in SQLite (through the app's own small native module) with
+  versioned migrations, plus a small native journal so
   no fix is lost while the JS runtime is not running.
-- **Maps:** [MapLibre React Native](https://maplibre.org/maplibre-react-native/) with free
-  [OpenFreeMap](https://openfreemap.org) vector tiles — no API key, account or billing.
+- **Maps:** [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/) (shipped inside the app) in a
+  WebView, with free [OpenFreeMap](https://openfreemap.org) vector tiles — no API key, account or
+  billing.
 
 ## Contents
 
@@ -41,10 +43,11 @@ What has been verified, and how — nothing below is claimed beyond what was act
 | Start/pause/resume/finish, journal→SQLite exactly-once, JS restart, killed process, crash between commit and ack, orphaned sessions, discard | Integration tests: real SQLite (Node's built-in engine) + a fake native module with the service's semantics (`tests/integration`) |
 | Migrations, constraints, cascade delete, achievement idempotency, backup round-trip | Integration tests |
 | Native module compiles; debug APK builds | `./gradlew assembleDebug` on Windows (JDK 17, AGP 9.2, Gradle 9.4) |
-| Release (R8-minified) APK | `./gradlew assembleRelease` → 74.7 MB (arm64-v8a + x86_64; MapLibre's native library is 10.5 MB per ABI). Installed over the debug build on the emulator: data preserved; Track map with OpenFreeMap tiles, a walk recorded and finished with the live map, detail-screen map and replay. The pre-MapLibre release build also recorded a walk with **airplane mode on**; that offline run has not been repeated since the map change |
+| Release (R8-minified) APK | `./gradlew assembleRelease` → **11.3 MB**, arm64-v8a only (79.4 MB before the size work: arm64-v8a + x86_64, MapLibre Native) — see [App size](#app-size). Builds and compiles; **not yet run on a device** (it adds the built-in SQLite module, font subsets and the Fresco exclusion). An earlier 13.1 MB build for x86_64 started on the Android 17 emulator without errors and the dashboard rendered with the SVG icons and trimmed fonts; the map, chart and a recorded walk were not re-checked on it. Earlier release builds (MapLibre Native) were checked on the emulator: installed over the debug build with data preserved, a walk recorded and finished with the live map, detail-screen map and replay, and one walk with **airplane mode on** |
 | End-to-end on Android 17 (API 37) **emulator** | Permission flow, first-fix acquisition, foreground service (`type=location`), live notification, recording with the display off, pause/resume and finish — see [emulator results](#emulator-smoke-test-results) |
-| Maps (MapLibre + OpenFreeMap) on the **emulator** | OpenFreeMap tiles load in the Liberty (light) and Dark styles; live route line, start/finish and position markers, accuracy circle; following, panning stops following, recenter, show whole route; detail screen fits the route; replay trail and marker. With no DNS in the emulator the style failed to load and the offline route sketch was shown instead |
-| **Not yet verified** | A physical phone; distance accuracy outdoors; long screen-locked sessions on real hardware; OEM battery killers; map tile caching while offline after a first online view; a signed release build installed on a device; the minSdk 24 device. Use [`docs/FIELD_TESTING.md`](docs/FIELD_TESTING.md). |
+| Maps on the **emulator** — with MapLibre Native, before the WebView map | OpenFreeMap tiles load in the Liberty (light) and Dark styles; live route line, start/finish and position markers, accuracy circle; following, panning stops following, recenter, show whole route; detail screen fits the route; replay trail and marker. With no DNS in the emulator the style failed to load and the offline route sketch was shown instead |
+| WebView map (MapLibre GL JS) | Unit tests of the page builder and its message protocol (`tests/unit/mapPage.test.ts`); type-checked against react-native-webview. **Not yet run on an emulator or phone** — repeat the map checks above |
+| **Not yet verified** | The WebView map and the SVG bar chart on a device; the built-in SQLite module on a device (including opening a database written by an earlier expo-sqlite build); the app without Fresco's JPEG transcoder and filter libraries; a physical phone; distance accuracy outdoors; long screen-locked sessions on real hardware; OEM battery killers; map tile caching while offline after a first online view; a signed release build installed on a device; the minSdk 24 device. Use [`docs/FIELD_TESTING.md`](docs/FIELD_TESTING.md). |
 
 ### Emulator smoke test results
 
@@ -105,18 +108,25 @@ Other scripts: `npm run typecheck`, `npm run lint`, `npm run prebuild`, `npm sta
 
 ## Maps
 
-Maps are drawn by MapLibre Native from free vector tiles served by
-[OpenFreeMap](https://openfreemap.org) (OpenStreetMap data): no API key, registration or usage
-limits. Light mode uses the *Liberty* style, dark mode *Dark* — see `src/constants/map.ts`, where
-any other MapLibre style URL (another provider or a self-hosted tile server) can be swapped in.
+Maps are drawn by [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/) inside a WebView, from
+free vector tiles served by [OpenFreeMap](https://openfreemap.org) (OpenStreetMap data): no API
+key, registration or usage limits. Light mode uses the *Liberty* style, dark mode *Dark* — see
+`src/constants/map.ts`, where any other MapLibre style URL (another provider or a self-hosted tile
+server) can be swapped in.
 
-- Attribution ("OpenFreeMap © OpenMapTiles Data from OpenStreetMap") is shown by MapLibre's ⓘ
-  button on every map; keep it enabled — it is required by the tile and data licences.
-- Tiles need an internet connection the first time an area is viewed; MapLibre caches what it has
-  shown. If the map style cannot load, the app shows an offline sketch of the route instead.
-  Recording never depends on the map.
+- The map page (`src/components/map/mapPage.ts`) and MapLibre GL JS itself ship with the app; the
+  page loads nothing from a CDN, only the style, tiles, fonts and icons of the map from the tile
+  server. The library is copied from the pinned `maplibre-gl` devDependency (5.x: the last version
+  with a single-file build) into `src/components/map/vendor/` by `npm run vendor:maplibre`.
+- A WebView map replaced MapLibre Native to keep the APK small: the native renderer alone was
+  about 4 MB of the compressed APK, the JavaScript library is about 0.3 MB.
+- Attribution ("OpenFreeMap © OpenMapTiles Data from OpenStreetMap") is behind the map's ⓘ button;
+  keep it — it is required by the tile and data licences. Its links open in the browser.
+- Tiles need an internet connection the first time an area is viewed; the WebView's HTTP cache
+  keeps what it has shown. If the map style cannot load, the app shows an offline sketch of the
+  route instead. Recording never depends on the map.
 - The route, gaps (dashed), start/finish, current position with its accuracy circle and the replay
-  marker are drawn as MapLibre layers from the recorded fixes; nothing is snapped to roads.
+  marker are drawn as map layers from the recorded fixes; nothing is snapped to roads.
 
 ## Run on a physical phone
 
@@ -166,6 +176,37 @@ any other MapLibre style URL (another provider or a self-hosted tile server) can
 `eas.json` contains equivalent `development` / `preview` / `production` profiles if you prefer
 EAS Build (note that EAS uploads the project to Expo's build servers).
 
+### App size
+
+A release APK is **11.3 MB** (79.4 MB before the changes below). Most of what remains is React
+Native, Hermes and Expo modules (6 MB of compressed native code), 2.5 MB of Java/Kotlin code and
+1.4 MB of JavaScript (including the map library); fonts are 0.24 MB.
+
+- **Phones only:** `buildArchs: ["arm64-v8a"]` in the `expo-build-properties` plugin (`app.json`).
+  Every current phone is arm64; 32-bit-only phones and x86_64 emulators can't install the release
+  APK. For an emulator, build with `./gradlew assembleRelease -PreactNativeArchitectures=x86_64`.
+  Debug builds from `npx expo run:android` are compiled for the connected device automatically.
+- **Compressed native code and JavaScript** (`useLegacyPackaging`, `enableBundleCompression`):
+  Android stores both uncompressed by default, which roughly doubles the APK. The JS bundle is
+  unpacked when the app starts, which costs a little start-up time.
+- **Shrinking:** R8 (`enableMinifyInReleaseBuilds`), unused resources removed
+  (`enableShrinkResourcesInReleaseBuilds`), no GIF/WebP decoders (`gifEnabled`, `webpEnabled`; the
+  app has neither), English-only resources (`plugins/withEnglishOnlyResources.js`), and Fresco's
+  JPEG transcoder and filter libraries left out (`packagingOptions.exclude`): the app never shows
+  images through React Native's `<Image>`. Remove that exclusion before using `<Image>` with JPEGs
+  or `blurRadius`.
+- **In the app:** the map is MapLibre GL JS in a WebView (MapLibre Native was ~4 MB), icons are
+  SVG paths (`src/components/iconPaths.ts`) instead of a 1.3 MB icon font, fonts are Latin subsets
+  (`npm run fonts:subset`; Android draws other characters with the system font) and body text uses
+  two Inter weights, the database uses Android's built-in SQLite instead of expo-sqlite's bundled
+  copy (~1 MB), the bar chart is drawn with `react-native-svg` instead of a chart library, and
+  `metro.config.js` keeps expo-router's unused optional modules (Expo UI, expo-symbols and the
+  1 MB Material Symbols font they need) out of the bundle.
+
+For Google Play, upload the AAB (`./gradlew bundleRelease`) instead: Play delivers only the phone's
+architecture and compresses downloads itself, so `useLegacyPackaging` can be turned off there for
+faster installs.
+
 ### Windows notes
 
 - Deep project folders exceed the 260-character path limit in React Native's C++ builds. The
@@ -173,7 +214,7 @@ EAS Build (note that EAS uploads the project to Expo's build servers).
   and `react-native.config.js` excludes native libraries the app does not use. If you still see
   "Filename longer than 260 characters", move the project to a shorter path (e.g. `C:\dev\stride`)
   or enable Windows long paths.
-- Use JDK 17 for Gradle (`JAVA_HOME`).
+- Use JDK 17 or newer for Gradle (`JAVA_HOME`); Android Studio's bundled JBR (JDK 25) works.
 - `metro.config.js` stops Metro from crawling Gradle/CMake outputs inside `node_modules/*/android`
   (tens of thousands of binaries), which otherwise makes the first Metro start after a native build
   very slow.
@@ -193,7 +234,7 @@ EAS Build (note that EAS uploads the project to Expo's build servers).
 │ TrackingEngine: read journal → GPS filter → one transaction:                   │
 │   route_points + activity totals + tracking_state(filter state, cursor)        │
 │   → then acknowledge (delete) journal rows                                     │
-│ Repositories (expo-sqlite, WAL, synchronous=FULL) ◀── screens via              │
+│ Repositories (built-in SQLite, synchronous=FULL) ◀── screens via               │
 │ useDatabaseQuery (re-query on data change)                                     │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -202,9 +243,12 @@ Key decisions:
 
 - **Recording does not depend on JS.** The service writes every fix to a native journal before
   anything else. JS processes it when it can (immediately while the app is alive, including in
-  the background; otherwise on next launch). The journal is a separate database file because the
-  app database belongs to expo-sqlite's bundled SQLite and two SQLite libraries must never share
-  a file.
+  the background; otherwise on next launch). The journal is a separate database file, written by
+  the service on its own thread without waiting for the app database.
+- **Built-in SQLite.** The app database goes through `modules/app-database` (one connection, one
+  thread, `synchronous=FULL`) instead of expo-sqlite, whose bundled SQLite added ~1 MB. Android 7
+  ships SQLite 3.9, so the SQL avoids newer syntax such as UPSERT;
+  `tests/unit/sqlCompatibility.test.ts` checks for it.
 - **Exactly-once processing.** Route points, totals, the filter state and the journal cursor are
   committed in one transaction; journal rows are deleted only after that commit. A crash between
   the two re-reads rows that are then skipped by the cursor/sequence checks.
@@ -230,9 +274,10 @@ For each fix, in order:
 
 1. Ignore journal replays (sequence ≤ last processed).
 2. Reject invalid coordinates.
-3. Reject duplicates (same timestamp) and out-of-order fixes, using monotonic timestamps.
-4. Reject fixes with reported accuracy worse than **30 m** (or unknown).
-5. A new recording segment (after pause/resume or recovery) starts a new line; nothing is joined.
+3. A new recording segment (after pause/resume or recovery) starts a new line; nothing is joined.
+4. Reject duplicates (same timestamp) and out-of-order fixes within a segment, using monotonic
+   timestamps (that clock restarts when the phone reboots, so it is not compared across segments).
+5. Reject fixes with reported accuracy worse than **30 m** (or unknown).
 6. A much more precise first fix replaces a coarse segment start instead of adding a phantom jump.
 7. **Gaps** (no usable fix for > 15 s): ≤ 120 s and plausible speed → the straight-line distance
    between the two fixes is counted (a lower bound) and drawn dashed; longer → no distance, the line breaks.
@@ -253,7 +298,8 @@ warnings. These values are starting points; tune them with `docs/FIELD_TESTING.m
 
 ## Data model
 
-SQLite file `stride.db`, schema version in `PRAGMA user_version`, migrations in
+SQLite file `files/SQLite/stride.db` (the path expo-sqlite used, so data from earlier builds is
+kept), schema version in `PRAGMA user_version`, migrations in
 `src/database/migrations.ts`.
 
 | Table | Purpose |
@@ -287,7 +333,8 @@ SharedPreferences (session state machine).
 - All data stays on the phone. Stride never transmits tracks; there is no backend, account or
   analytics. Android Auto Backup is disabled (`allowBackup=false`).
 - Map tiles come from OpenFreeMap's public servers, which see the requested map area and the
-  phone's IP address (no account, key or cookies). Recording, history and statistics work offline.
+  phone's IP address (no account, key or cookies). The map's rendering library ships inside the
+  app, so no other server is contacted. Recording, history and statistics work offline.
 - Uninstalling the app or clearing its storage deletes everything. **Settings → Export backup**
   writes a JSON file and opens the share sheet so you choose where it goes; **Import backup**
   merges a file back (duplicates are skipped).
@@ -303,8 +350,10 @@ npm test
 
 - `tests/unit`: geodesy, GPS filter on synthetic traces (stationary noise, straight walk, slow
   walk, running loop with turns, zig-zags, duplicates, out-of-order, jump, relocation, short and
-  long gaps, low accuracy, pause/resume, state persistence), pace/format, statistics (incl.
-  midnight crossing), goals, achievements, route geometry and replay.
+  long gaps, low accuracy, pause/resume, recovery after a reboot, state persistence),
+  pace/format, statistics (incl. midnight crossing), goals, achievements, route geometry and
+  replay, the WebView map page, and one-shot route requests (Home's start buttons, the
+  notification's Finish).
 - `tests/integration`: the tracking engine and repositories against real SQLite (Node's
   `node:sqlite`) with `tests/support/fakeNative.ts` mirroring the service: lifecycle, duplicate
   prevention, exactly-once journal processing, JS restart, process kill/recovery, finish after
@@ -326,7 +375,8 @@ npm test
 | GPS stays "Searching" | Go outdoors, enable location (high accuracy), wait 30–60 s; "Start anyway" appears after 45 s. |
 | Debug app shows the splash forever | Metro not reachable: run `npx expo start`, `adb reverse tcp:8081 tcp:8081`; on Android 17 allow the debug-only local-network permission. |
 | `Filename longer than 260 characters` (Windows) | See [Windows notes](#windows-notes). |
-| Gradle: unsupported Java | Use JDK 17 (`JAVA_HOME`). |
+| Gradle: unsupported Java | Use JDK 17 or newer (`JAVA_HOME`). |
+| Gradle: `could not open ...\jbr\lib\jvm.cfg` | `JAVA_HOME` points at an incomplete JDK (e.g. a leftover Android Studio folder). Point it at a complete one, such as the `jbr` folder of the Android Studio you use. |
 
 ## Project structure
 
@@ -334,7 +384,8 @@ npm test
 src/app/                 Expo Router screens: (tabs)/index, track, history, statistics, settings;
                          activity/[id], goals, diagnostics
 src/components/          Reusable UI (metrics, buttons, map, route sketch, charts, banners, floating
-                         tab bar, goal ring, holographic stickers…)
+                         tab bar, goal ring, holographic stickers, SVG icons…)
+src/components/map/      WebView map page; vendor/ holds MapLibre GL JS (npm run vendor:maplibre)
 src/constants/           Design tokens ("Afterglow": colours, type, radii) and the font set
 src/features/tracking/   GPS filter, quality, config, engine, permissions
 src/features/activities/ Route geometry, replay, activity services
@@ -345,11 +396,16 @@ src/features/backup/     Export/import
 src/database/            SQLite connection, migrations, repositories, write queue
 src/hooks/, src/utils/   Hooks; geodesy, pace, dates, formatting
 modules/android-location Kotlin foreground service, journal, session state, Expo module
-plugins/                 Config plugins (Windows CMake paths, release signing)
+modules/app-database     The app database on Android's built-in SQLite (Expo module)
+assets/fonts/            Latin subsets of the app's fonts with their licences (npm run fonts:subset)
+plugins/                 Config plugins (Windows CMake paths, release signing, English-only resources)
+metro/                   Stand-in for expo-router's unused optional modules (see metro.config.js)
+scripts/vendor-maplibre.js Copies MapLibre GL JS into src/components/map/vendor/
 tests/                   Unit and integration tests, synthetic traces, fakes
 docs/FIELD_TESTING.md    Real-device test procedure
 docs/ui-redesign/        Design system (DESIGN.md) and Google Stitch prompts for each screen
 scripts/generate-icons.js App icon generator
+scripts/subset-fonts.js  Regenerates assets/fonts (needs Python 3 with fontTools)
 ```
 
 ## Known limitations
@@ -363,3 +419,4 @@ scripts/generate-icons.js App icon generator
 - An activity crossing midnight counts entirely for the day it started.
 - Map tiles need internet the first time an area is viewed; there is no explicit offline-region download.
 - The weekly/monthly goal types exist in the schema but only the daily goal has UI.
+- Release APKs contain arm64-v8a code only and English resources only (see [App size](#app-size)).
